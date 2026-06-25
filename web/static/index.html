@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Page Replacement Simulator + Copy-on-Write</title>
+    <link rel="stylesheet" href="/css/style.css">
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Page Replacement Simulator + Copy-on-Write</h1>
+            <div class="status-bar">
+                <span class="status-item">Algorithm: <strong id="current-algorithm">LRU</strong></span>
+                <span class="status-item">Uptime: <strong id="uptime">0s</strong></span>
+                <span class="status-item">Processes: <strong id="process-count">0</strong></span>
+                <span class="status-item">
+                    <span class="status-indicator" id="connection-status"></span>
+                    <span id="connection-text">Connecting...</span>
+                </span>
+            </div>
+        </header>
+
+        <div class="main-content">
+            <!-- Left Panel: Controls & Info -->
+            <div class="left-panel">
+                <div class="panel">
+                    <h2>System Metrics</h2>
+                    <div class="metrics-grid">
+                        <div class="metric-card">
+                            <div class="metric-label">Page Fault Rate</div>
+                            <div class="metric-value" id="fault-rate">0%</div>
+                        </div>
+                        <div class="metric-card">
+                            <div class="metric-label">Page Hit Rate</div>
+                            <div class="metric-value" id="hit-rate">0%</div>
+                        </div>
+                        <div class="metric-card">
+                            <div class="metric-label">Memory Usage</div>
+                            <div class="metric-value" id="memory-usage">0%</div>
+                        </div>
+                        <div class="metric-card">
+                            <div class="metric-label">CoW Copies</div>
+                            <div class="metric-value" id="cow-copies">0</div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="panel">
+                    <h2>Algorithm Selection</h2>
+                    <div class="algorithm-selector">
+                        <button class="algo-btn active" data-algo="LRU">LRU</button>
+                        <button class="algo-btn" data-algo="CLOCK">CLOCK</button>
+                        <button class="algo-btn" data-algo="LFU">LFU</button>
+                        <button class="algo-btn" data-algo="FIFO">FIFO</button>
+                        <button class="algo-btn" data-algo="Optimal">Optimal</button>
+                <button class="algo-btn" data-algo="Random">Random</button>
+                    </div>
+                </div>
+
+                <div class="panel">
+                    <h2>Process Management</h2>
+                    <form id="create-process-form">
+                        <div class="form-group">
+                            <label>Process Name</label>
+                            <input type="text" id="process-name" placeholder="Process1" required>
+                        </div>
+                        <div class="form-group">
+                            <label>Priority</label>
+                            <input type="number" id="process-priority" value="1" min="0" max="10">
+                        </div>
+                        <div class="form-group">
+                            <label>Virtual Pages</label>
+                            <input type="number" id="virtual-pages" value="1000" min="10" max="10000">
+                        </div>
+                        <button type="submit" class="btn btn-primary">Create Process</button>
+                    </form>
+                </div>
+
+                <div class="panel">
+                    <h2>Simulation Scenarios</h2>
+                    <div id="scenarios-list" class="scenarios-grid">
+                        <!-- Populated dynamically -->
+                    </div>
+                </div>
+
+                <div class="panel">
+                    <h2>Actions</h2>
+                    <button class="btn btn-secondary" id="reset-btn">Reset System</button>
+                </div>
+            </div>
+
+            <!-- Center Panel: Visualization -->
+            <div class="center-panel">
+                <div class="panel visualization-panel">
+                    <h2>Physical Memory Frames</h2>
+                    <div id="frame-visualization"></div>
+                </div>
+
+                <div class="panel">
+                    <h2>Memory Statistics</h2>
+                    <div class="stats-grid">
+                        <div class="stat-row">
+                            <span class="stat-label">Total Accesses:</span>
+                            <span class="stat-value" id="total-accesses">0</span>
+                        </div>
+                        <div class="stat-row">
+                            <span class="stat-label">Page Faults:</span>
+                            <span class="stat-value" id="page-faults">0</span>
+                        </div>
+                        <div class="stat-row">
+                            <span class="stat-label">Page Hits:</span>
+                            <span class="stat-value" id="page-hits">0</span>
+                        </div>
+                        <div class="stat-row">
+                            <span class="stat-label">Evictions:</span>
+                            <span class="stat-value" id="evictions">0</span>
+                        </div>
+                        <div class="stat-row">
+                            <span class="stat-label">Used Frames:</span>
+                            <span class="stat-value" id="used-frames">0</span>
+                        </div>
+                        <div class="stat-row">
+                            <span class="stat-label">Free Frames:</span>
+                            <span class="stat-value" id="free-frames">0</span>
+                        </div>
+                        <div class="stat-row">
+                            <span class="stat-label">Shared Pages:</span>
+                            <span class="stat-value" id="shared-pages">0</span>
+                        </div>
+                        <div class="stat-row">
+                            <span class="stat-label">Dirty Pages:</span>
+                            <span class="stat-value" id="dirty-pages">0</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Right Panel: Processes & Events -->
+            <div class="right-panel">
+                <div class="panel">
+                    <h2>Active Processes</h2>
+                    <div id="process-list">
+                        <p class="empty-state">No processes running</p>
+                    </div>
+                </div>
+
+                <div class="panel">
+                    <h2>Event Log</h2>
+                    <div id="event-log">
+                        <!-- Events populated here -->
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="/js/app.js"></script>
+</body>
+</html>
