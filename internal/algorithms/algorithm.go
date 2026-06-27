@@ -4,28 +4,15 @@ import (
 	"github.com/page-replacement-cow/pkg/models"
 )
 
-// PageReplacementAlgorithm defines the interface for page replacement algorithms
 type PageReplacementAlgorithm interface {
-	// SelectVictim selects a page to evict from the given list of frames
 	SelectVictim(frames []*models.Frame) (*models.Frame, error)
-
-	// OnPageAccess is called when a page is accessed
 	OnPageAccess(frame *models.Frame, write bool)
-
-	// OnPageFault is called when a page fault occurs
 	OnPageFault(frame *models.Frame)
-
-	// OnPageEviction is called when a page is evicted
 	OnPageEviction(frame *models.Frame)
-
-	// GetName returns the name of the algorithm
 	GetName() string
-
-	// Reset resets the algorithm state
 	Reset()
 }
 
-// AlgorithmType represents the type of page replacement algorithm
 type AlgorithmType int
 
 const (
@@ -35,9 +22,13 @@ const (
 	AlgorithmFIFO
 	AlgorithmOptimal
 	AlgorithmRandom
+	AlgorithmARC
+	AlgorithmCAR
+	AlgorithmWSClock
+	AlgorithmPFF
+	AlgorithmOPTPlus
 )
 
-// GetAlgorithmName returns the name of an algorithm type
 func GetAlgorithmName(algType AlgorithmType) string {
 	switch algType {
 	case AlgorithmLRU:
@@ -52,6 +43,16 @@ func GetAlgorithmName(algType AlgorithmType) string {
 		return "Optimal"
 	case AlgorithmRandom:
 		return "Random"
+	case AlgorithmARC:
+		return "ARC"
+	case AlgorithmCAR:
+		return "CAR"
+	case AlgorithmWSClock:
+		return "WSClock"
+	case AlgorithmPFF:
+		return "PFF"
+	case AlgorithmOPTPlus:
+		return "OPT+"
 	default:
 		return "Unknown"
 	}
