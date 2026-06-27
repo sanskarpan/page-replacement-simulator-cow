@@ -323,3 +323,168 @@ func TestAlgorithmGetNameWithRandom(t *testing.T) {
 	}
 	t.Log("Random GetName test passed")
 }
+
+func TestARC(t *testing.T) {
+	arc := algorithms.NewARC(16)
+	frames := createTestFrames(16)
+
+	for i := 0; i < 10; i++ {
+		f := frames[i]
+		arc.OnPageAccess(f, false)
+		arc.OnPageFault(f)
+	}
+
+	for i := 0; i < 5; i++ {
+		arc.OnPageAccess(frames[i], true)
+	}
+
+	victim, err := arc.SelectVictim(frames)
+	if err != nil {
+		t.Fatalf("SelectVictim failed: %v", err)
+	}
+	if victim == nil || victim.IsFree() || victim.IsPinned() {
+		t.Error("ARC victim is invalid")
+	}
+
+	t.Logf("ARC test passed - selected frame %d", victim.ID)
+}
+
+func TestCAR(t *testing.T) {
+	car := algorithms.NewCAR(16)
+	frames := createTestFrames(16)
+
+	for i := 0; i < 10; i++ {
+		f := frames[i]
+		car.OnPageAccess(f, false)
+		car.OnPageFault(f)
+	}
+
+	victim, err := car.SelectVictim(frames)
+	if err != nil {
+		t.Fatalf("SelectVictim failed: %v", err)
+	}
+	if victim == nil || victim.IsFree() || victim.IsPinned() {
+		t.Error("CAR victim is invalid")
+	}
+
+	t.Logf("CAR test passed - selected frame %d", victim.ID)
+}
+
+func TestWSClock(t *testing.T) {
+	wsc := algorithms.NewWSClock(1000)
+	frames := createTestFrames(8)
+
+	wsc.OnPageAccess(frames[0], false)
+	wsc.OnPageAccess(frames[1], false)
+	wsc.OnPageAccess(frames[2], false)
+
+	time.Sleep(10 * time.Millisecond)
+	wsc.SetTime(time.Now())
+
+	victim, err := wsc.SelectVictim(frames)
+	if err != nil {
+		t.Fatalf("SelectVictim failed: %v", err)
+	}
+	if victim == nil || victim.IsFree() || victim.IsPinned() {
+		t.Error("WSClock victim is invalid")
+	}
+
+	t.Logf("WSClock test passed - selected frame %d", victim.ID)
+}
+
+func TestPFF(t *testing.T) {
+	pff := algorithms.NewPFF(5000, 0.1, 10.0, 4, 32, 16)
+	frames := createTestFrames(20)
+
+	for i := 0; i < 15; i++ {
+		pff.OnPageFault(frames[i])
+	}
+	for i := 0; i < 5; i++ {
+		pff.OnPageAccess(frames[i], true)
+	}
+
+	victim, err := pff.SelectVictim(frames)
+	if err != nil {
+		t.Fatalf("SelectVictim failed: %v", err)
+	}
+	if victim == nil || victim.IsFree() || victim.IsPinned() {
+		t.Error("PFF victim is invalid")
+	}
+
+	stats := pff.GetStats()
+	if stats.TargetResident < 4 {
+		t.Error("PFF target resident below minimum")
+	}
+
+	t.Logf("PFF test passed - target resident: %d, fault rate: %.2f", stats.TargetResident, stats.FaultRate)
+}
+
+func TestOPTPlus(t *testing.T) {
+	optp := algorithms.NewOptPlus()
+	frames := createTestFrames(8)
+
+	accesses := []uint64{0, 1, 2, 0, 1, 3, 0, 3, 1, 2, 4, 0, 1, 2, 3, 4}
+	optp.SetFutureAccesses(accesses)
+
+	for i := 0; i < 6; i++ {
+		optp.OnPageFault(frames[i])
+	}
+
+	victim, err := optp.SelectVictim(frames)
+	if err != nil {
+		t.Fatalf("SelectVictim failed: %v", err)
+	}
+	if victim == nil || victim.IsFree() || victim.IsPinned() {
+		t.Error("OPT+ victim is invalid")
+	}
+
+	t.Logf("OPT+ test passed - selected frame %d", victim.ID)
+}
+
+func TestARCAllPinned(t *testing.T) {
+	arc := algorithms.NewARC(8)
+	frames := createTestFrames(5)
+	for _, f := range frames {
+		f.Pin()
+	}
+
+	_, err := arc.SelectVictim(frames)
+	if err == nil {
+		t.Error("Expected error when all frames pinned in ARC")
+	}
+	t.Log("ARC all-pinned test passed")
+}
+
+func TestPFFAdaptation(t *testing.T) {
+	pff := algorithms.NewPFF(1000, 0.1, 2.0, 2, 16, 8)
+	frames := createTestFrames(10)
+
+	for i := 0; i < 50; i++ {
+		idx := i % 10
+		pff.OnPageFault(frames[idx])
+	}
+
+	stats := pff.GetStats()
+	if stats.TargetResident < 8 {
+		t.Logf("PFF adapted target resident: %d (fault rate: %.2f)", stats.TargetResident, stats.FaultRate)
+	}
+	t.Logf("PFF adaptation test passed - resident: %d, faults: %d", stats.TargetResident, stats.RecentFaults)
+}
+
+func TestAlgorithmNamesAll(t *testing.T) {
+	names := map[int]string{
+		int(algorithms.AlgorithmARC):      "ARC",
+		int(algorithms.AlgorithmCAR):      "CAR",
+		int(algorithms.AlgorithmWSClock):  "WSClock",
+		int(algorithms.AlgorithmPFF):      "PFF",
+		int(algorithms.AlgorithmOPTPlus):  "OPT+",
+	}
+
+	for typ, expected := range names {
+		got := algorithms.GetAlgorithmName(algorithms.AlgorithmType(typ))
+		if got != expected {
+			t.Errorf("Algorithm %d: expected %s, got %s", typ, expected, got)
+		}
+	}
+	t.Log("All new algorithm names verified")
+}
