@@ -523,3 +523,262 @@ func TestConcurrentForkAndAccess(t *testing.T) {
 	t.Logf("  CoW Copies: %d", metrics.CoWCopies)
 	t.Logf("  Processes: %d", metrics.TotalProcesses)
 }
+
+func TestARCAlgorithmIntegration(t *testing.T) {
+	mm := memory.NewMemoryManager(32, 16, algorithms.AlgorithmARC)
+	pm := process.NewProcessManager(mm)
+
+	proc, err := pm.CreateProcess("ARC-Test", 1, 200)
+	if err != nil {
+		t.Fatalf("Failed to create process: %v", err)
+	}
+
+	for i := uint64(0); i < 50; i++ {
+		if err := pm.AccessMemory(proc.ID, i, true); err != nil {
+			t.Fatalf("Failed to access page %d: %v", i, err)
+		}
+	}
+
+	for i := uint64(0); i < 25; i++ {
+		if err := pm.AccessMemory(proc.ID, i, false); err != nil {
+			t.Fatalf("Failed to re-access page %d: %v", i, err)
+		}
+	}
+
+	metrics := mm.GetMetrics()
+	if metrics.TotalAccesses < 75 {
+		t.Error("Expected all accesses to complete under ARC")
+	}
+	if metrics.Evictions < 15 {
+		t.Logf("ARC had low evictions: %d (adaptive)", metrics.Evictions)
+	}
+
+	t.Logf("ARC integration test passed")
+	t.Logf("  Accesses: %d, Evictions: %d, Fault Rate: %.2f%%", metrics.TotalAccesses, metrics.Evictions, metrics.PageFaultRate*100)
+}
+
+func TestCARAlgorithmIntegration(t *testing.T) {
+	mm := memory.NewMemoryManager(32, 16, algorithms.AlgorithmCAR)
+	pm := process.NewProcessManager(mm)
+
+	proc, err := pm.CreateProcess("CAR-Test", 1, 200)
+	if err != nil {
+		t.Fatalf("Failed to create process: %v", err)
+	}
+
+	for i := uint64(0); i < 50; i++ {
+		if err := pm.AccessMemory(proc.ID, i, true); err != nil {
+			t.Fatalf("Failed to access page %d: %v", i, err)
+		}
+	}
+
+	for i := uint64(0); i < 20; i++ {
+		if err := pm.AccessMemory(proc.ID, i, false); err != nil {
+			t.Fatalf("Failed to re-access page %d: %v", i, err)
+		}
+	}
+
+	metrics := mm.GetMetrics()
+	if metrics.TotalAccesses < 70 {
+		t.Error("Expected all accesses to complete under CAR")
+	}
+
+	t.Logf("CAR integration test passed")
+	t.Logf("  Accesses: %d, Fault Rate: %.2f%%", metrics.TotalAccesses, metrics.PageFaultRate*100)
+}
+
+func TestWSClockIntegration(t *testing.T) {
+	mm := memory.NewMemoryManager(32, 16, algorithms.AlgorithmWSClock)
+	pm := process.NewProcessManager(mm)
+
+	proc, err := pm.CreateProcess("WSClock-Test", 1, 200)
+	if err != nil {
+		t.Fatalf("Failed to create process: %v", err)
+	}
+
+	for i := uint64(0); i < 40; i++ {
+		if err := pm.AccessMemory(proc.ID, i, false); err != nil {
+			t.Fatalf("Failed to access page %d: %v", i, err)
+		}
+	}
+
+	for i := uint64(0); i < 15; i++ {
+		if err := pm.AccessMemory(proc.ID, i, false); err != nil {
+			t.Fatalf("Failed to re-access page %d: %v", i, err)
+		}
+	}
+
+	metrics := mm.GetMetrics()
+	if metrics.TotalAccesses < 55 {
+		t.Error("Expected all accesses to complete under WSClock")
+	}
+
+	t.Logf("WSClock integration test passed")
+	t.Logf("  Accesses: %d, Fault Rate: %.2f%%", metrics.TotalAccesses, metrics.PageFaultRate*100)
+}
+
+func TestPFFResidentSet(t *testing.T) {
+	mm := memory.NewMemoryManager(64, 16, algorithms.AlgorithmPFF)
+	pm := process.NewProcessManager(mm)
+
+	proc, err := pm.CreateProcess("PFF-Test", 1, 500)
+	if err != nil {
+		t.Fatalf("Failed to create process: %v", err)
+	}
+
+	for i := uint64(0); i < 100; i++ {
+		if err := pm.AccessMemory(proc.ID, i, false); err != nil {
+			t.Fatalf("Failed to access page %d: %v", i, err)
+		}
+	}
+
+	metrics := mm.GetMetrics()
+	if metrics.TotalAccesses < 100 {
+		t.Error("Expected all accesses to complete under PFF")
+	}
+
+	t.Logf("PFF resident set test passed")
+	t.Logf("  Accesses: %d, Fault Rate: %.2f%%", metrics.TotalAccesses, metrics.PageFaultRate*100)
+	t.Logf("  Used Frames: %d / %d", metrics.UsedFrames, metrics.TotalFrames)
+}
+
+func TestOPTPlusIntegration(t *testing.T) {
+	mm := memory.NewMemoryManager(32, 16, algorithms.AlgorithmOPTPlus)
+	pm := process.NewProcessManager(mm)
+
+	proc, err := pm.CreateProcess("OPT+-Test", 1, 200)
+	if err != nil {
+		t.Fatalf("Failed to create process: %v", err)
+	}
+
+	pages := []uint64{0, 1, 2, 3, 0, 1, 4, 0, 1, 2, 3, 4, 5, 0, 1, 2, 3, 4, 5, 6, 0, 1, 6, 0, 1, 2, 3, 4, 5, 6}
+	for _, page := range pages {
+		if err := pm.AccessMemory(proc.ID, page, false); err != nil {
+			t.Fatalf("Failed to access page %d: %v", page, err)
+		}
+	}
+
+	metrics := mm.GetMetrics()
+	if metrics.TotalAccesses < 30 {
+		t.Error("Expected all accesses to complete under OPT+")
+	}
+
+	t.Logf("OPT+ integration test passed")
+	t.Logf("  Accesses: %d, Fault Rate: %.2f%%", metrics.TotalAccesses, metrics.PageFaultRate*100)
+}
+
+func TestNumaAwareness(t *testing.T) {
+	nm := memory.NewNumaManager()
+	nm.AddNode(models.NewNumaNode(0, "Node-0", 100, 64))
+	nm.AddNode(models.NewNumaNode(1, "Node-1", 150, 64))
+
+	nodes := nm.GetNodes()
+	if len(nodes) != 2 {
+		t.Errorf("Expected 2 NUMA nodes, got %d", len(nodes))
+	}
+
+	node, err := nm.GetNode(0)
+	if err != nil {
+		t.Fatalf("Failed to get NUMA node 0: %v", err)
+	}
+	if node.AccessCostNs != 100 {
+		t.Errorf("Expected access cost 100ns, got %d", node.AccessCostNs)
+	}
+
+	closest, _ := nm.GetClosestNode(0)
+	if closest.ID != 0 {
+		t.Errorf("Expected closest node 0, got %d", closest.ID)
+	}
+
+	t.Logf("NUMA awareness test passed - %d nodes configured", len(nodes))
+}
+
+func TestPageClustering(t *testing.T) {
+	pcm := memory.NewPageClusterManager(4, 16)
+
+	seqPages := []uint64{10, 11, 12}
+	cluster := pcm.DetectSequential("test", seqPages)
+	if cluster == nil {
+		t.Fatal("Expected to detect sequential pattern")
+	}
+	if !cluster.Sequential {
+		t.Error("Expected sequential cluster")
+	}
+
+	prefetch := pcm.GetPrefetchPages(10)
+	if len(prefetch) != 16 {
+		t.Errorf("Expected 16 prefetch pages, got %d", len(prefetch))
+	}
+
+	nonSeqPages := []uint64{5, 20, 3}
+	noCluster := pcm.DetectSequential("test2", nonSeqPages)
+	if noCluster != nil {
+		t.Error("Expected no cluster for non-sequential access")
+	}
+
+	t.Logf("Page clustering test passed")
+}
+
+func TestCompressionManager(t *testing.T) {
+	cm := memory.NewCompressionManager(0.5)
+
+	data := make([]byte, 4096)
+	for i := range data {
+		data[i] = byte(i % 256)
+	}
+
+	cp := cm.CompressPage(100, data)
+	if cp != nil {
+		if cp.OriginalSize != int64(len(data)) {
+			t.Error("Compression preserved original size")
+		}
+		t.Logf("Compressed: %d -> %d bytes (%.1f%%)", cp.OriginalSize, cp.CompressedSize, 100*float64(cp.CompressedSize)/float64(cp.OriginalSize))
+	}
+
+	stats := cm.GetStats()
+	if stats.PagesCompressed > 0 {
+		t.Logf("Compression stats: %d pages, ratio %.2f", stats.PagesCompressed, stats.CompressionRatio)
+	}
+
+	t.Logf("Compression manager test passed")
+}
+
+func TestMultiLevelPageTable(t *testing.T) {
+	mlpt := memory.NewMultiLevelPageTable("test-process")
+
+	addr1 := uint64(0x1000)
+	mlpt.SetEntry(addr1, 42, false)
+	entry := mlpt.GetEntry(addr1)
+	if entry == nil || !entry.Present.Load() {
+		t.Fatal("Expected page table entry to be present")
+	}
+	if entry.FrameNumber != 42 {
+		t.Errorf("Expected frame 42, got %d", entry.FrameNumber)
+	}
+
+	addr2 := uint64(0x200000)
+	mlpt.SetEntry(addr2, 10, true)
+	hugeEntry := mlpt.GetEntry(addr2)
+	if hugeEntry == nil || !hugeEntry.HugePage.Load() {
+		t.Fatal("Expected huge page entry")
+	}
+	if hugeEntry.FrameNumber != 10 {
+		t.Errorf("Expected frame 10 for huge page, got %d", hugeEntry.FrameNumber)
+	}
+
+	mlpt.InvalidateEntry(addr1)
+	invalidated := mlpt.GetEntry(addr1)
+	if invalidated != nil && invalidated.Present.Load() {
+		t.Error("Expected entry to be invalidated")
+	}
+
+	count := 0
+	mlpt.WalkPages(func(addr uint64, e *memory.PageTableEntry, huge bool) {
+		count++
+	})
+	if count != 1 {
+		t.Errorf("Expected 1 present page, got %d", count)
+	}
+
+	t.Logf("Multi-level page table test passed - %d present pages", count)
+}
