@@ -21,7 +21,7 @@ func main() {
 	port := flag.Int("port", 8080, "Server port")
 	numFrames := flag.Int("frames", 128, "Number of physical memory frames")
 	tlbSize := flag.Int("tlb", 16, "TLB size")
-	algo := flag.String("algorithm", "LRU", "Page replacement algorithm (LRU, CLOCK, LFU, FIFO, Optimal, Random)")
+	algo := flag.String("algorithm", "LRU", "Page replacement algorithm (LRU, CLOCK, LFU, FIFO, Optimal, Random, ARC, CAR, WSClock, PFF, OPT+)")
 	corsDomains := flag.String("cors", "localhost", "Allowed CORS domains (comma-separated, use * for all)")
 	flag.Parse()
 
@@ -39,6 +39,16 @@ func main() {
 		algType = algorithms.AlgorithmOptimal
 	case "Random":
 		algType = algorithms.AlgorithmRandom
+	case "ARC":
+		algType = algorithms.AlgorithmARC
+	case "CAR":
+		algType = algorithms.AlgorithmCAR
+	case "WSClock":
+		algType = algorithms.AlgorithmWSClock
+	case "PFF":
+		algType = algorithms.AlgorithmPFF
+	case "OPT+":
+		algType = algorithms.AlgorithmOPTPlus
 	default:
 		log.Fatalf("Invalid algorithm: %s", *algo)
 	}

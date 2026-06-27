@@ -77,6 +77,16 @@ func (mm *MemoryManager) SetAlgorithm(algType algorithms.AlgorithmType) {
 		mm.algorithm = algorithms.NewOptimal()
 	case algorithms.AlgorithmRandom:
 		mm.algorithm = algorithms.NewRandom()
+	case algorithms.AlgorithmARC:
+		mm.algorithm = algorithms.NewARC(mm.numFrames)
+	case algorithms.AlgorithmCAR:
+		mm.algorithm = algorithms.NewCAR(mm.numFrames)
+	case algorithms.AlgorithmWSClock:
+		mm.algorithm = algorithms.NewWSClock(1000)
+	case algorithms.AlgorithmPFF:
+		mm.algorithm = algorithms.NewPFF(5000, 0.1, 10.0, 4, mm.numFrames, mm.numFrames/2)
+	case algorithms.AlgorithmOPTPlus:
+		mm.algorithm = algorithms.NewOptPlus()
 	default:
 		mm.algorithm = algorithms.NewLRU()
 	}
