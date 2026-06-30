@@ -11,6 +11,7 @@ type Frame struct {
 	ID          int32  // Frame number
 	PageID      uint64 // Currently mapped page ID (0 if free)
 	ProcessID   string // Process owning this frame
+	NumaNodeID  int32  // NUMA node this frame belongs to
 
 	// State
 	Free     atomic.Bool
@@ -45,11 +46,17 @@ func NewFrame(id int32) *Frame {
 
 // Allocate allocates this frame to a page
 func (f *Frame) Allocate(pageID uint64, processID string) {
+	f.AllocateNuma(pageID, processID, 0)
+}
+
+// AllocateNuma allocates this frame to a page on a specific NUMA node
+func (f *Frame) AllocateNuma(pageID uint64, processID string, numaNodeID int32) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
 	f.PageID = pageID
 	f.ProcessID = processID
+	f.NumaNodeID = numaNodeID
 	f.Free.Store(false)
 	f.Modified.Store(false)
 	f.ReferenceBit.Store(1)
@@ -58,6 +65,11 @@ func (f *Frame) Allocate(pageID uint64, processID string) {
 	f.LoadedAt.Store(now)
 	f.LastAccess.Store(now)
 	f.AccessCount.Store(0)
+}
+
+// GetNumaNodeID returns the NUMA node ID
+func (f *Frame) GetNumaNodeID() int32 {
+	return f.NumaNodeID
 }
 
 // Release releases this frame
