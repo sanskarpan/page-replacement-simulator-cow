@@ -10,56 +10,78 @@ import (
 	"github.com/page-replacement-cow/pkg/models"
 )
 
-// MemoryManager manages virtual memory, page tables, and page replacement
 type MemoryManager struct {
-	// Physical memory
-	frameTable *FrameTable
-	numFrames  int32
-
-	// Page tables (one per process)
-	pageTables map[string]*PageTable
-
-	// TLB
-	tlb *TLB
-
-	// Page replacement algorithm
-	algorithm algorithms.PageReplacementAlgorithm
-
-	// Copy-on-Write
-	cowManager *cow.CopyOnWrite
-
-	// Metrics
-	metrics *models.Metrics
-
-	// Process tracking
-	processes map[string]*models.Process
-
-	// Synchronization
-	mu sync.RWMutex
-
-	// Event callback
+	frameTable    *FrameTable
+	numFrames     int32
+	pageTables    map[string]*PageTable
+	multiLevelPT  map[string]*MultiLevelPageTable
+	tlb           *TLB
+	algorithm     algorithms.PageReplacementAlgorithm
+	cowManager    *cow.CopyOnWrite
+	metrics       *models.Metrics
+	processes     map[string]*models.Process
+	mu            sync.RWMutex
 	eventCallback func(event string, data map[string]interface{})
+
+	numaManager          *NumaManager
+	compressionManager   *CompressionManager
+	clusterManager       *PageClusterManager
+	recentAccesses       map[string][]uint64
+	numaEnabled          bool
+	compressionEnabled   bool
+	clusteringEnabled    bool
 }
 
-// NewMemoryManager creates a new memory manager
 func NewMemoryManager(numFrames int32, tlbSize int, algType algorithms.AlgorithmType) *MemoryManager {
 	mm := &MemoryManager{
-		frameTable: NewFrameTable(numFrames),
-		numFrames:  numFrames,
-		pageTables: make(map[string]*PageTable),
-		tlb:        NewTLB(tlbSize),
-		cowManager: cow.NewCopyOnWrite(),
-		metrics:    models.NewMetrics(numFrames),
-		processes:  make(map[string]*models.Process),
+		frameTable:         NewFrameTable(numFrames),
+		numFrames:          numFrames,
+		pageTables:         make(map[string]*PageTable),
+		multiLevelPT:       make(map[string]*MultiLevelPageTable),
+		tlb:                NewTLB(tlbSize),
+		cowManager:         cow.NewCopyOnWrite(),
+		metrics:            models.NewMetrics(numFrames),
+		processes:          make(map[string]*models.Process),
+		numaManager:        NewNumaManager(),
+		compressionManager: NewCompressionManager(0.7),
+		clusterManager:     NewPageClusterManager(4, 16),
+		recentAccesses:     make(map[string][]uint64),
+		numaEnabled:        false,
+		compressionEnabled: false,
+		clusteringEnabled:  false,
 	}
 
-	// Set page replacement algorithm
 	mm.SetAlgorithm(algType)
 
 	return mm
 }
 
-// SetAlgorithm sets the page replacement algorithm
+func (mm *MemoryManager) EnableNuma(enabled bool) {
+	mm.mu.Lock()
+	defer mm.mu.Unlock()
+	mm.numaEnabled = enabled
+	if enabled && len(mm.numaManager.GetNodes()) == 0 {
+		mm.numaManager.AddNode(models.NewNumaNode(0, "Node-0", 100, mm.numFrames/2))
+		mm.numaManager.AddNode(models.NewNumaNode(1, "Node-1", 150, mm.numFrames/2))
+	}
+}
+
+func (mm *MemoryManager) EnableCompression(enabled bool) {
+	mm.mu.Lock()
+	defer mm.mu.Unlock()
+	mm.compressionEnabled = enabled
+}
+
+func (mm *MemoryManager) EnableClustering(enabled bool) {
+	mm.mu.Lock()
+	defer mm.mu.Unlock()
+	mm.clusteringEnabled = enabled
+}
+
+func (mm *MemoryManager) GetNumaManager() *NumaManager   { return mm.numaManager }
+func (mm *MemoryManager) GetCompressionManager() *CompressionManager { return mm.compressionManager }
+func (mm *MemoryManager) GetClusterManager() *PageClusterManager { return mm.clusterManager }
+
 func (mm *MemoryManager) SetAlgorithm(algType algorithms.AlgorithmType) {
 	mm.mu.Lock()
 	defer mm.mu.Unlock()
@@ -92,7 +114,6 @@ func (mm *MemoryManager) SetAlgorithm(algType algorithms.AlgorithmType) {
 	}
 }
 
-// CreateProcess creates a new process with a page table
 func (mm *MemoryManager) CreateProcess(process *models.Process) error {
 	mm.mu.Lock()
 	defer mm.mu.Unlock()
@@ -103,6 +124,8 @@ func (mm *MemoryManager) CreateProcess(process *models.Process) error {
 
 	mm.processes[process.ID] = process
 	mm.pageTables[process.ID] = NewPageTable(process.ID)
+	mm.multiLevelPT[process.ID] = NewMultiLevelPageTable(process.ID)
+	mm.recentAccesses[process.ID] = make([]uint64, 0, 16)
 	mm.metrics.TotalProcesses.Add(1)
 	mm.metrics.ActiveProcesses.Add(1)
 
@@ -114,7 +137,6 @@ func (mm *MemoryManager) CreateProcess(process *models.Process) error {
 	return nil
 }
 
-// RemoveProcess removes a process and cleans up its resources
 func (mm *MemoryManager) RemoveProcess(processID string) error {
 	mm.mu.Lock()
 	defer mm.mu.Unlock()
@@ -124,7 +146,6 @@ func (mm *MemoryManager) RemoveProcess(processID string) error {
 		return fmt.Errorf("process %s not found", processID)
 	}
 
-	// Release all frames used by this process
 	pages := pageTable.GetAllPages()
 	for _, page := range pages {
 		if page.IsPresent() {
@@ -133,22 +154,19 @@ func (mm *MemoryManager) RemoveProcess(processID string) error {
 				mm.frameTable.ReleaseFrame(frameNum)
 			}
 		}
-
-		// Handle CoW cleanup
 		if page.IsShared() {
 			mm.cowManager.UnsharePage(page.ID, processID)
 		}
 	}
 
-	// Remove from CoW manager
 	mm.cowManager.RemoveProcess(processID)
-
-	// Invalidate TLB entries
 	mm.tlb.InvalidateProcess(processID)
+	mm.clusterManager.ClearClusters(processID)
 
-	// Remove page table
 	delete(mm.pageTables, processID)
+	delete(mm.multiLevelPT, processID)
 	delete(mm.processes, processID)
+	delete(mm.recentAccesses, processID)
 
 	mm.metrics.ActiveProcesses.Add(-1)
 
@@ -159,7 +177,6 @@ func (mm *MemoryManager) RemoveProcess(processID string) error {
 	return nil
 }
 
-// AccessMemory handles a memory access (read or write)
 func (mm *MemoryManager) AccessMemory(processID string, virtualPage uint64, write bool) error {
 	startTime := time.Now()
 
@@ -172,21 +189,21 @@ func (mm *MemoryManager) AccessMemory(processID string, virtualPage uint64, writ
 
 	process.RecordMemoryAccess()
 
-	// Try TLB first
+	if mm.clusteringEnabled {
+		mm.trackAccess(processID, virtualPage)
+	}
+
 	if frameNum, hit := mm.tlb.Lookup(processID, virtualPage); hit {
-		// TLB hit
 		frame, _ := mm.frameTable.GetFrame(frameNum)
 		if frame != nil {
 			mm.algorithm.OnPageAccess(frame, write)
 			process.RecordPageHit()
 			mm.metrics.RecordPageHit()
 
-			// Check for CoW on write
 			if write {
 				pageTable := mm.pageTables[processID]
 				page, _ := pageTable.GetPage(virtualPage)
 				if page != nil && page.IsShared() {
-					// Handle copy-on-write
 					if err := mm.handleCoW(processID, page, frame); err != nil {
 						return err
 					}
@@ -205,7 +222,6 @@ func (mm *MemoryManager) AccessMemory(processID string, virtualPage uint64, writ
 		}
 	}
 
-	// TLB miss - check page table
 	mm.mu.Lock()
 	defer mm.mu.Unlock()
 
@@ -217,7 +233,6 @@ func (mm *MemoryManager) AccessMemory(processID string, virtualPage uint64, writ
 	page := pageTable.GetOrCreatePage(virtualPage)
 
 	if page.IsPresent() {
-		// Page in memory but TLB miss
 		frameNum := page.GetFrame()
 		frame, _ := mm.frameTable.GetFrame(frameNum)
 		if frame != nil {
@@ -226,7 +241,6 @@ func (mm *MemoryManager) AccessMemory(processID string, virtualPage uint64, writ
 			process.RecordPageHit()
 			mm.metrics.RecordPageHit()
 
-			// Check for CoW on write
 			if write && page.IsShared() {
 				if err := mm.handleCoW(processID, page, frame); err != nil {
 					return err
@@ -246,7 +260,6 @@ func (mm *MemoryManager) AccessMemory(processID string, virtualPage uint64, writ
 		}
 	}
 
-	// Page fault
 	if err := mm.handlePageFault(processID, page, write); err != nil {
 		return err
 	}
@@ -261,54 +274,122 @@ func (mm *MemoryManager) AccessMemory(processID string, virtualPage uint64, writ
 		"latency_ns":   time.Since(startTime).Nanoseconds(),
 	})
 
+	if mm.clusteringEnabled {
+		mm.tryPrefetch(processID) // checks against numFrames internally
+	}
+
 	return nil
 }
 
-// handlePageFault handles a page fault
-func (mm *MemoryManager) handlePageFault(processID string, page *models.Page, write bool) error {
-	// Try to allocate a free frame
-	frame, err := mm.frameTable.AllocateFrame(page.ID, processID)
+func (mm *MemoryManager) trackAccess(processID string, virtualPage uint64) {
+	accesses, ok := mm.recentAccesses[processID]
+	if !ok {
+		return
+	}
+	accesses = append(accesses, virtualPage)
+	if len(accesses) > 16 {
+		accesses = accesses[1:]
+	}
+	mm.recentAccesses[processID] = accesses
 
-	if err != nil {
-		// No free frames - need to evict
-		evictStartTime := time.Now()
-		usedFrames := mm.frameTable.GetUsedFrames()
-		victim, err := mm.algorithm.SelectVictim(usedFrames)
-		if err != nil {
-			return fmt.Errorf("failed to select victim: %v", err)
-		}
+	if len(accesses) >= 3 {
+		tail := accesses[len(accesses)-3:]
+		mm.clusterManager.DetectSequential(processID, tail)
+	}
+}
 
-		// Evict the victim
-		if err := mm.evictPage(victim); err != nil {
-			return fmt.Errorf("failed to evict page: %v", err)
-		}
-
-		evictionTime := time.Since(evictStartTime).Nanoseconds()
-		mm.metrics.LastEvictionTimeNs.Store(evictionTime)
-
-		// Allocate the now-free frame
-		frame = victim
-		frame.Allocate(page.ID, processID)
+func (mm *MemoryManager) tryPrefetch(processID string) {
+	pages := mm.recentAccesses[processID]
+	if len(pages) == 0 {
+		return
+	}
+	lastPage := pages[len(pages)-1]
+	prefetchPages := mm.clusterManager.GetPrefetchPages(lastPage)
+	if len(prefetchPages) == 0 {
+		return
 	}
 
-	// Load page into frame
+	for i := 0; i < 2; i++ {
+		if i >= len(prefetchPages) {
+			break
+		}
+		prefetchPage := prefetchPages[i]
+		pageTable, ok := mm.pageTables[processID]
+		if !ok {
+			return
+		}
+		p := pageTable.GetOrCreatePage(prefetchPage)
+
+		frame, err := mm.frameTable.AllocateFrame(p.ID, processID)
+		if err != nil {
+			return
+		}
+		if mm.numaEnabled {
+			frame.NumaNodeID = mm.selectLocalNode(processID)
+		}
+		p.SetFrame(frame.ID)
+		mm.algorithm.OnPageFault(frame)
+		mm.tlb.Insert(processID, p.ID, frame.ID)
+	}
+}
+
+func (mm *MemoryManager) handlePageFault(processID string, page *models.Page, write bool) error {
+	if mm.compressionEnabled {
+		cp := mm.compressionManager.DecompressPage(page.ID)
+		if cp != nil {
+			frame, err := mm.frameTable.AllocateFrame(page.ID, processID)
+			if err != nil {
+				mm.atomicEvictAndAlloc(page, processID)
+			} else {
+				page.SetFrame(frame.ID)
+				mm.algorithm.OnPageFault(frame)
+				mm.tlb.Insert(processID, page.ID, frame.ID)
+			}
+			return nil
+		}
+	}
+
+	frame, err := mm.frameTable.AllocateFrame(page.ID, processID)
+	if err != nil {
+		mm.atomicEvictAndAlloc(page, processID)
+	} else {
+		if mm.numaEnabled {
+			frame.NumaNodeID = mm.selectLocalNode(processID)
+		}
+		page.SetFrame(frame.ID)
+		mm.algorithm.OnPageFault(frame)
+		mm.tlb.Insert(processID, page.ID, frame.ID)
+	}
+
+	if write && page.IsShared() {
+		f, _ := mm.frameTable.GetFrame(page.GetFrame())
+		if f != nil {
+			return mm.handleCoW(processID, page, f)
+		}
+	}
+
+	return nil
+}
+
+func (mm *MemoryManager) atomicEvictAndAlloc(page *models.Page, processID string) {
+	usedFrames := mm.frameTable.GetUsedFrames()
+	victim, err := mm.algorithm.SelectVictim(usedFrames)
+	if err != nil {
+		return
+	}
+
+	mm.evictPage(victim)
+
+	frame := victim
+	frame.Allocate(page.ID, processID)
+	if mm.numaEnabled {
+		frame.NumaNodeID = mm.selectLocalNode(processID)
+	}
 	page.SetFrame(frame.ID)
 	mm.algorithm.OnPageFault(frame)
-
-	// Update TLB
 	mm.tlb.Insert(processID, page.ID, frame.ID)
-
-	// Handle CoW if this is a write to a shared page
-	if write && page.IsShared() {
-		if err := mm.handleCoW(processID, page, frame); err != nil {
-			return err
-		}
-	}
-
-	return nil
 }
 
-// handleCoW handles copy-on-write for a shared page
 func (mm *MemoryManager) handleCoW(processID string, page *models.Page, frame *models.Frame) error {
 	needsCopy, newPageID, err := mm.cowManager.HandleWrite(page.ID, processID, page)
 	if err != nil {
@@ -316,47 +397,40 @@ func (mm *MemoryManager) handleCoW(processID string, page *models.Page, frame *m
 	}
 
 	if !needsCopy {
-		// No copy needed - just mark as writable
 		page.Shared.Store(false)
 		page.ReadOnly.Store(false)
 		return nil
 	}
 
-	// Need to create a copy
 	newPage, err := mm.cowManager.CopyPage(page, newPageID, processID)
 	if err != nil {
 		return err
 	}
 
-	// Allocate a new frame for the copy
 	newFrame, err := mm.frameTable.AllocateFrame(newPageID, processID)
 	if err != nil {
-		// Need to evict
 		usedFrames := mm.frameTable.GetUsedFrames()
 		victim, err := mm.algorithm.SelectVictim(usedFrames)
 		if err != nil {
 			return err
 		}
-
 		if err := mm.evictPage(victim); err != nil {
 			return err
 		}
-
 		newFrame = victim
 		newFrame.Allocate(newPageID, processID)
 	}
 
-	// Update page to point to new frame
+	if mm.numaEnabled {
+		newFrame.NumaNodeID = mm.selectLocalNode(processID)
+	}
+
 	newPage.SetFrame(newFrame.ID)
 
-	// Update page table
 	pageTable := mm.pageTables[processID]
 	pageTable.Entries[page.ID] = newPage
 
-	// Invalidate old TLB entry
 	mm.tlb.Invalidate(processID, page.ID)
-
-	// Insert new TLB entry
 	mm.tlb.Insert(processID, newPageID, newFrame.ID)
 
 	mm.metrics.RecordCoWCopy()
@@ -376,7 +450,6 @@ func (mm *MemoryManager) handleCoW(processID string, page *models.Page, frame *m
 	return nil
 }
 
-// evictPage evicts a page from a frame
 func (mm *MemoryManager) evictPage(frame *models.Frame) error {
 	if frame == nil {
 		return fmt.Errorf("frame is nil")
@@ -385,7 +458,11 @@ func (mm *MemoryManager) evictPage(frame *models.Frame) error {
 	pageID := frame.GetPageID()
 	processID := frame.GetProcessID()
 
-	// Find the page in the page table
+	if mm.compressionEnabled && frame.IsModified() {
+		dummyData := make([]byte, 4096)
+		mm.compressionManager.CompressPage(pageID, dummyData)
+	}
+
 	pageTable, exists := mm.pageTables[processID]
 	if exists {
 		for _, page := range pageTable.GetAllPages() {
@@ -396,13 +473,8 @@ func (mm *MemoryManager) evictPage(frame *models.Frame) error {
 		}
 	}
 
-	// Invalidate TLB entry
 	mm.tlb.Invalidate(processID, pageID)
-
-	// Notify algorithm
 	mm.algorithm.OnPageEviction(frame)
-
-	// Record eviction
 	mm.metrics.RecordEviction(frame.IsModified())
 
 	mm.emitEvent("page_eviction", map[string]interface{}{
@@ -412,13 +484,11 @@ func (mm *MemoryManager) evictPage(frame *models.Frame) error {
 		"dirty":      frame.IsModified(),
 	})
 
-	// Release frame
 	frame.Release()
 
 	return nil
 }
 
-// ForkProcess creates a child process with CoW from parent
 func (mm *MemoryManager) ForkProcess(parentID, childID string, childProcess *models.Process) error {
 	mm.mu.Lock()
 	defer mm.mu.Unlock()
@@ -428,12 +498,12 @@ func (mm *MemoryManager) ForkProcess(parentID, childID string, childProcess *mod
 		return fmt.Errorf("parent process %s not found", parentID)
 	}
 
-	// Create child page table as a clone
 	childTable := parentTable.Clone(childID)
 	mm.pageTables[childID] = childTable
+	mm.multiLevelPT[childID] = NewMultiLevelPageTable(childID)
+	mm.recentAccesses[childID] = make([]uint64, 0, 16)
 	mm.processes[childID] = childProcess
 
-	// Set up CoW for all pages
 	parentPages := parentTable.GetPresentPages()
 	childPages := childTable.GetPresentPages()
 
@@ -441,7 +511,6 @@ func (mm *MemoryManager) ForkProcess(parentID, childID string, childProcess *mod
 		return err
 	}
 
-	// Mark all pages as shared
 	for _, page := range append(parentPages, childPages...) {
 		page.MakeShared()
 	}
@@ -458,7 +527,6 @@ func (mm *MemoryManager) ForkProcess(parentID, childID string, childProcess *mod
 	return nil
 }
 
-// GetMetrics returns current metrics (read-only, no side effects)
 func (mm *MemoryManager) GetMetrics() *models.MetricsSnapshot {
 	mm.mu.RLock()
 	defer mm.mu.RUnlock()
@@ -479,7 +547,6 @@ func (mm *MemoryManager) GetMetrics() *models.MetricsSnapshot {
 	)
 }
 
-// GetProcess returns a process
 func (mm *MemoryManager) GetProcess(processID string) (*models.Process, error) {
 	mm.mu.RLock()
 	defer mm.mu.RUnlock()
@@ -492,7 +559,6 @@ func (mm *MemoryManager) GetProcess(processID string) (*models.Process, error) {
 	return process, nil
 }
 
-// GetAllProcesses returns all processes
 func (mm *MemoryManager) GetAllProcesses() []*models.Process {
 	mm.mu.RLock()
 	defer mm.mu.RUnlock()
@@ -504,7 +570,6 @@ func (mm *MemoryManager) GetAllProcesses() []*models.Process {
 	return processes
 }
 
-// GetPageTable returns a process's page table
 func (mm *MemoryManager) GetPageTable(processID string) (*PageTable, error) {
 	mm.mu.RLock()
 	defer mm.mu.RUnlock()
@@ -517,43 +582,40 @@ func (mm *MemoryManager) GetPageTable(processID string) (*PageTable, error) {
 	return pt, nil
 }
 
-// GetFrameTable returns the frame table
-func (mm *MemoryManager) GetFrameTable() *FrameTable {
-	return mm.frameTable
+func (mm *MemoryManager) GetMultiLevelPageTable(processID string) (*MultiLevelPageTable, error) {
+	mm.mu.RLock()
+	defer mm.mu.RUnlock()
+
+	mpt, exists := mm.multiLevelPT[processID]
+	if !exists {
+		return nil, fmt.Errorf("multi-level page table not found for process %s", processID)
+	}
+
+	return mpt, nil
 }
 
-// GetTLB returns the TLB
-func (mm *MemoryManager) GetTLB() *TLB {
-	return mm.tlb
-}
+func (mm *MemoryManager) GetFrameTable() *FrameTable         { return mm.frameTable }
+func (mm *MemoryManager) GetTLB() *TLB                       { return mm.tlb }
+func (mm *MemoryManager) GetCoWManager() *cow.CopyOnWrite   { return mm.cowManager }
 
-// GetCoWManager returns the CoW manager
-func (mm *MemoryManager) GetCoWManager() *cow.CopyOnWrite {
-	return mm.cowManager
-}
-
-// GetAlgorithm returns the current page replacement algorithm
 func (mm *MemoryManager) GetAlgorithm() algorithms.PageReplacementAlgorithm {
 	mm.mu.RLock()
 	defer mm.mu.RUnlock()
 	return mm.algorithm
 }
 
-// SetEventCallback sets the event callback function
 func (mm *MemoryManager) SetEventCallback(callback func(event string, data map[string]interface{})) {
 	mm.mu.Lock()
 	defer mm.mu.Unlock()
 	mm.eventCallback = callback
 }
 
-// emitEvent emits an event to the callback
 func (mm *MemoryManager) emitEvent(event string, data map[string]interface{}) {
 	if mm.eventCallback != nil {
 		go mm.eventCallback(event, data)
 	}
 }
 
-// SetFutureAccesses sets the future access pattern for the Optimal algorithm
 func (mm *MemoryManager) SetFutureAccesses(accesses []uint64) {
 	mm.mu.RLock()
 	alg := mm.algorithm
@@ -562,9 +624,11 @@ func (mm *MemoryManager) SetFutureAccesses(accesses []uint64) {
 	if opt, ok := alg.(*algorithms.Optimal); ok {
 		opt.SetFutureAccesses(accesses)
 	}
+	if optp, ok := alg.(*algorithms.OptPlus); ok {
+		optp.SetFutureAccesses(accesses)
+	}
 }
 
-// Reset resets the memory manager state
 func (mm *MemoryManager) Reset() {
 	mm.mu.Lock()
 	defer mm.mu.Unlock()
@@ -572,10 +636,26 @@ func (mm *MemoryManager) Reset() {
 	mm.frameTable.Clear()
 	mm.tlb.Clear()
 	mm.cowManager.Reset()
+	mm.compressionManager.Reset()
+	mm.clusterManager.ClearClusters("")
 	mm.pageTables = make(map[string]*PageTable)
+	mm.multiLevelPT = make(map[string]*MultiLevelPageTable)
 	mm.processes = make(map[string]*models.Process)
+	mm.recentAccesses = make(map[string][]uint64)
 	mm.metrics.Reset()
 	mm.algorithm.Reset()
 
 	mm.emitEvent("system_reset", map[string]interface{}{})
+}
+
+func (mm *MemoryManager) selectLocalNode(processID string) int32 {
+	return int32(hashString(processID) % 2)
+}
+
+func hashString(s string) uint64 {
+	var h uint64
+	for i := 0; i < len(s); i++ {
+		h = h*31 + uint64(s[i])
+	}
+	return h
 }
