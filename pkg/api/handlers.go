@@ -7,6 +7,7 @@ import (
 
 	"github.com/gorilla/mux"
 	"github.com/page-replacement-cow/internal/algorithms"
+	"github.com/page-replacement-cow/internal/memory"
 )
 
 // HandleGetStatus returns system status
@@ -320,6 +321,73 @@ func (s *Server) HandleGetCoWStats(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, stats)
 }
 
+// HandleGetNumaStats returns NUMA statistics
+func (s *Server) HandleGetNumaStats(w http.ResponseWriter, r *http.Request) {
+	nm := s.memoryManager.GetNumaManager()
+	nodes := nm.GetNodes()
+	writeJSON(w, http.StatusOK, nodes)
+}
+
+// HandleGetCompressionStats returns compression statistics
+func (s *Server) HandleGetCompressionStats(w http.ResponseWriter, r *http.Request) {
+	cm := s.memoryManager.GetCompressionManager()
+	writeJSON(w, http.StatusOK, cm.GetStats())
+}
+
+// HandleEnableFeature toggles advanced features
+func (s *Server) HandleEnableFeature(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Feature string `json:"feature"`
+		Enabled bool   `json:"enabled"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	switch req.Feature {
+	case "numa":
+		s.memoryManager.EnableNuma(req.Enabled)
+	case "compression":
+		s.memoryManager.EnableCompression(req.Enabled)
+	case "clustering":
+		s.memoryManager.EnableClustering(req.Enabled)
+	default:
+		writeError(w, http.StatusBadRequest, "unknown feature: "+req.Feature)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"feature": req.Feature,
+		"enabled": req.Enabled,
+	})
+}
+
+// HandleGetMultiLevelPageTable returns a multi-level page table for a process
+func (s *Server) HandleGetMultiLevelPageTable(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	pid := vars["id"]
+
+	mpt, err := s.memoryManager.GetMultiLevelPageTable(pid)
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+
+	entries := make([]map[string]interface{}, 0)
+	mpt.WalkPages(func(addr uint64, entry *memory.PageTableEntry, huge bool) {
+		entries = append(entries, map[string]interface{}{
+			"virtual_addr": addr,
+			"frame":        entry.FrameNumber,
+			"present":      entry.Present.Load(),
+			"dirty":        entry.Dirty.Load(),
+			"huge":         huge,
+		})
+	})
+
+	writeJSON(w, http.StatusOK, entries)
+}
+
 // Helper functions
 
 func writeJSON(w http.ResponseWriter, status int, data interface{}) {
@@ -366,6 +434,12 @@ func SetupRoutes(s *Server) *mux.Router {
 	// Simulation
 	api.HandleFunc("/simulation/scenarios", s.HandleGetScenarios).Methods("GET")
 	api.HandleFunc("/simulation/run", s.HandleRunSimulation).Methods("POST")
+
+	// Advanced features
+	api.HandleFunc("/numa/stats", s.HandleGetNumaStats).Methods("GET")
+	api.HandleFunc("/compression/stats", s.HandleGetCompressionStats).Methods("GET")
+	api.HandleFunc("/feature/toggle", s.HandleEnableFeature).Methods("POST")
+	api.HandleFunc("/processes/{id}/mpt", s.HandleGetMultiLevelPageTable).Methods("GET")
 
 	// WebSocket
 	api.HandleFunc("/ws", s.HandleWebSocket)
