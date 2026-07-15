@@ -82,8 +82,8 @@ func (nm *NumaManager) estimateAccessCost(from, to *models.NumaNode) int64 {
 }
 
 func (nm *NumaManager) AllocateFrameOnNode(nodeID int32, pageID uint64, processID string) (*models.Frame, error) {
-	nm.mu.RLock()
-	defer nm.mu.RUnlock()
+	nm.mu.Lock()
+	defer nm.mu.Unlock()
 
 	node, err := nm.getNodeLocked(nodeID)
 	if err != nil {
@@ -95,7 +95,9 @@ func (nm *NumaManager) AllocateFrameOnNode(nodeID int32, pageID uint64, processI
 	}
 
 	node.LocalFrames--
-	return nil, nil
+	frame := models.NewFrame(int32(pageID))
+	frame.AllocateNuma(pageID, processID, nodeID)
+	return frame, nil
 }
 
 func (nm *NumaManager) GetNodes() []*models.NumaNode {
@@ -142,6 +144,7 @@ func (pcm *PageClusterManager) DetectSequential(processID string, pages []uint64
 		ClusterSize: pcm.maxClusterSize,
 		Sequential:  true,
 		Pages:       make([]*models.Page, 0, pcm.maxClusterSize),
+		ProcessID:   processID,
 	}
 	pcm.clusters[pages[0]] = cluster
 
@@ -167,7 +170,15 @@ func (pcm *PageClusterManager) GetPrefetchPages(anchorPage uint64) []uint64 {
 func (pcm *PageClusterManager) ClearClusters(processID string) {
 	pcm.mu.Lock()
 	defer pcm.mu.Unlock()
-	pcm.clusters = make(map[uint64]*models.PageCluster)
+	if processID == "" {
+		pcm.clusters = make(map[uint64]*models.PageCluster)
+		return
+	}
+	for anchor, cluster := range pcm.clusters {
+		if cluster.ProcessID == processID {
+			delete(pcm.clusters, anchor)
+		}
+	}
 }
 
 type CompressedPage struct {
@@ -204,9 +215,15 @@ func (cm *CompressionManager) ShouldCompress(pageID uint64) bool {
 }
 
 func (cm *CompressionManager) CompressPage(pageID uint64, data []byte) *CompressedPage {
-	compressedSize := int64(len(data)) * 3 / 4
+	if len(data) == 0 {
+		return nil
+	}
+	// Simulate 50% compression (representative of LZ-style on typical pages).
+	compressedSize := int64(len(data)) / 2
 
-	if float64(compressedSize)/float64(len(data)) > cm.minRatio {
+	// Reject if the compressed/original ratio meets or exceeds the threshold
+	// (i.e. not enough savings to justify compression overhead).
+	if float64(compressedSize)/float64(len(data)) >= cm.minRatio {
 		return nil
 	}
 

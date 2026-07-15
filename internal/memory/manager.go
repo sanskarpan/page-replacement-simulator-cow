@@ -10,6 +10,11 @@ import (
 	"github.com/page-replacement-cow/pkg/models"
 )
 
+type eventMsg struct {
+	event string
+	data  map[string]interface{}
+}
+
 type MemoryManager struct {
 	frameTable    *FrameTable
 	numFrames     int32
@@ -22,6 +27,7 @@ type MemoryManager struct {
 	processes     map[string]*models.Process
 	mu            sync.RWMutex
 	eventCallback func(event string, data map[string]interface{})
+	eventCh       chan eventMsg
 
 	numaManager          *NumaManager
 	compressionManager   *CompressionManager
@@ -43,7 +49,7 @@ func NewMemoryManager(numFrames int32, tlbSize int, algType algorithms.Algorithm
 		metrics:            models.NewMetrics(numFrames),
 		processes:          make(map[string]*models.Process),
 		numaManager:        NewNumaManager(),
-		compressionManager: NewCompressionManager(0.7),
+		compressionManager: NewCompressionManager(0.8),
 		clusterManager:     NewPageClusterManager(4, 16),
 		recentAccesses:     make(map[string][]uint64),
 		numaEnabled:        false,
@@ -52,6 +58,11 @@ func NewMemoryManager(numFrames int32, tlbSize int, algType algorithms.Algorithm
 	}
 
 	mm.SetAlgorithm(algType)
+
+	// Pass channel by value so eventWorker never reads the mm.eventCh field.
+	eventCh := make(chan eventMsg, 256)
+	mm.eventCh = eventCh
+	go mm.eventWorker(eventCh)
 
 	return mm
 }
@@ -189,41 +200,37 @@ func (mm *MemoryManager) AccessMemory(processID string, virtualPage uint64, writ
 
 	process.RecordMemoryAccess()
 
-	if mm.clusteringEnabled {
-		mm.trackAccess(processID, virtualPage)
-	}
-
-	if frameNum, hit := mm.tlb.Lookup(processID, virtualPage); hit {
-		frame, _ := mm.frameTable.GetFrame(frameNum)
-		if frame != nil {
-			mm.algorithm.OnPageAccess(frame, write)
-			process.RecordPageHit()
-			mm.metrics.RecordPageHit()
-
-			if write {
-				pageTable := mm.pageTables[processID]
-				page, _ := pageTable.GetPage(virtualPage)
-				if page != nil && page.IsShared() {
-					if err := mm.handleCoW(processID, page, frame); err != nil {
-						return err
-					}
-				}
+	// Read-only TLB fast path: no shared-map writes needed, so no lock required.
+	if !write {
+		if frameNum, hit := mm.tlb.Lookup(processID, virtualPage); hit {
+			frame, _ := mm.frameTable.GetFrame(frameNum)
+			if frame != nil {
+				mm.algorithm.OnPageAccess(frame, false)
+				process.RecordPageHit()
+				mm.metrics.RecordPageHit()
+				mm.emitEvent("memory_access", map[string]interface{}{
+					"process_id":   processID,
+					"virtual_page": virtualPage,
+					"write":        false,
+					"hit":          true,
+					"latency_ns":   time.Since(startTime).Nanoseconds(),
+				})
+				return nil
 			}
-
-			mm.emitEvent("memory_access", map[string]interface{}{
-				"process_id":   processID,
-				"virtual_page": virtualPage,
-				"write":        write,
-				"hit":          true,
-				"latency_ns":   time.Since(startTime).Nanoseconds(),
-			})
-
-			return nil
 		}
 	}
 
+	// Write-lock section: handles TLB misses, page faults, and write CoW.
+	// Guards pageTables, recentAccesses, and pageTable.Entries (BUG-02, BUG-03, BUG-04 fix).
 	mm.mu.Lock()
 	defer mm.mu.Unlock()
+
+	// trackAccess under write lock so recentAccesses map is fully guarded (BUG-03 fix).
+	// Prefetch hint only needs updating on the write-locked path since tryPrefetch
+	// is only ever called here, not on the read-only TLB fast path.
+	if mm.clusteringEnabled {
+		mm.trackAccess(processID, virtualPage)
+	}
 
 	pageTable, exists := mm.pageTables[processID]
 	if !exists {
@@ -252,7 +259,6 @@ func (mm *MemoryManager) AccessMemory(processID string, virtualPage uint64, writ
 				"virtual_page": virtualPage,
 				"write":        write,
 				"hit":          true,
-				"tlb_miss":     true,
 				"latency_ns":   time.Since(startTime).Nanoseconds(),
 			})
 
@@ -275,7 +281,7 @@ func (mm *MemoryManager) AccessMemory(processID string, virtualPage uint64, writ
 	})
 
 	if mm.clusteringEnabled {
-		mm.tryPrefetch(processID) // checks against numFrames internally
+		mm.tryPrefetch(processID)
 	}
 
 	return nil
@@ -339,7 +345,9 @@ func (mm *MemoryManager) handlePageFault(processID string, page *models.Page, wr
 		if cp != nil {
 			frame, err := mm.frameTable.AllocateFrame(page.ID, processID)
 			if err != nil {
-				mm.atomicEvictAndAlloc(page, processID)
+				if evErr := mm.atomicEvictAndAlloc(page, processID); evErr != nil {
+					return fmt.Errorf("handlePageFault (compressed): %w", evErr)
+				}
 			} else {
 				page.SetFrame(frame.ID)
 				mm.algorithm.OnPageFault(frame)
@@ -351,7 +359,9 @@ func (mm *MemoryManager) handlePageFault(processID string, page *models.Page, wr
 
 	frame, err := mm.frameTable.AllocateFrame(page.ID, processID)
 	if err != nil {
-		mm.atomicEvictAndAlloc(page, processID)
+		if evErr := mm.atomicEvictAndAlloc(page, processID); evErr != nil {
+			return fmt.Errorf("handlePageFault: %w", evErr)
+		}
 	} else {
 		if mm.numaEnabled {
 			frame.NumaNodeID = mm.selectLocalNode(processID)
@@ -362,8 +372,8 @@ func (mm *MemoryManager) handlePageFault(processID string, page *models.Page, wr
 	}
 
 	if write && page.IsShared() {
-		f, _ := mm.frameTable.GetFrame(page.GetFrame())
-		if f != nil {
+		f, err := mm.frameTable.GetFrame(page.GetFrame())
+		if err == nil && f != nil {
 			return mm.handleCoW(processID, page, f)
 		}
 	}
@@ -371,14 +381,16 @@ func (mm *MemoryManager) handlePageFault(processID string, page *models.Page, wr
 	return nil
 }
 
-func (mm *MemoryManager) atomicEvictAndAlloc(page *models.Page, processID string) {
+func (mm *MemoryManager) atomicEvictAndAlloc(page *models.Page, processID string) error {
 	usedFrames := mm.frameTable.GetUsedFrames()
 	victim, err := mm.algorithm.SelectVictim(usedFrames)
 	if err != nil {
-		return
+		return fmt.Errorf("no evictable frame: %w", err)
 	}
 
-	mm.evictPage(victim)
+	if err := mm.evictPage(victim); err != nil {
+		return fmt.Errorf("eviction failed: %w", err)
+	}
 
 	frame := victim
 	frame.Allocate(page.ID, processID)
@@ -388,6 +400,7 @@ func (mm *MemoryManager) atomicEvictAndAlloc(page *models.Page, processID string
 	page.SetFrame(frame.ID)
 	mm.algorithm.OnPageFault(frame)
 	mm.tlb.Insert(processID, page.ID, frame.ID)
+	return nil
 }
 
 func (mm *MemoryManager) handleCoW(processID string, page *models.Page, frame *models.Frame) error {
@@ -425,13 +438,19 @@ func (mm *MemoryManager) handleCoW(processID string, page *models.Page, frame *m
 		newFrame.NumaNodeID = mm.selectLocalNode(processID)
 	}
 
+	// Register the new CoW frame with the replacement algorithm so ARC/CAR
+	// T1/T2 lists stay coherent (BUG-06 fix).
+	mm.algorithm.OnPageFault(newFrame)
+
 	newPage.SetFrame(newFrame.ID)
 
 	pageTable := mm.pageTables[processID]
 	pageTable.Entries[page.ID] = newPage
 
 	mm.tlb.Invalidate(processID, page.ID)
-	mm.tlb.Insert(processID, newPageID, newFrame.ID)
+	// Use the original virtual page ID so post-CoW accesses hit the TLB
+	// (BUG-12 fix: was newPageID which is the synthetic CoW ID ≥1,000,000).
+	mm.tlb.Insert(processID, page.ID, newFrame.ID)
 
 	mm.metrics.RecordCoWCopy()
 	process := mm.processes[processID]
@@ -465,11 +484,10 @@ func (mm *MemoryManager) evictPage(frame *models.Frame) error {
 
 	pageTable, exists := mm.pageTables[processID]
 	if exists {
-		for _, page := range pageTable.GetAllPages() {
-			if page.ID == pageID && page.IsPresent() {
-				page.SetFrame(-1)
-				break
-			}
+		// O(1) direct lookup instead of O(n) GetAllPages scan (BUG-15 fix).
+		page, err := pageTable.GetPage(pageID)
+		if err == nil && page != nil && page.IsPresent() {
+			page.SetFrame(-1)
 		}
 	}
 
@@ -611,8 +629,23 @@ func (mm *MemoryManager) SetEventCallback(callback func(event string, data map[s
 }
 
 func (mm *MemoryManager) emitEvent(event string, data map[string]interface{}) {
-	if mm.eventCallback != nil {
-		go mm.eventCallback(event, data)
+	if mm.eventCallback == nil {
+		return
+	}
+	select {
+	case mm.eventCh <- eventMsg{event: event, data: data}:
+	default:
+		// Channel full: drop rather than blocking the caller (BUG-09 fix).
+	}
+}
+
+func (mm *MemoryManager) eventWorker(ch chan eventMsg) {
+	// ch is captured by value so this goroutine never reads mm.eventCh field.
+	for msg := range ch {
+		cb := mm.eventCallback
+		if cb != nil {
+			cb(msg.event, msg.data)
+		}
 	}
 }
 

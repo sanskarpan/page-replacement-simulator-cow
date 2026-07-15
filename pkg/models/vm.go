@@ -72,6 +72,7 @@ type PageCluster struct {
 	AnchorPage  uint64
 	ClusterSize int
 	Sequential  bool
+	ProcessID   string // owner process
 }
 
 type WorkingSetEntry struct {

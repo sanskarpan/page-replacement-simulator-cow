@@ -64,13 +64,14 @@ func (w *WSClock) SelectVictim(frames []*models.Frame) (*models.Frame, error) {
 		}
 
 		if age > w.workingSetAge {
-			if !frame.IsModified() {
-				return frame, nil
+			if frame.IsModified() {
+				// Simulate writeback: clear the dirty flag inline.
+				// In a real OS this initiates async I/O; here we mark the
+				// frame clean so it becomes an eviction candidate next pass.
+				frame.Modified.Store(false)
+				continue
 			}
-			frame.Pin()
-			go w.scheduleWriteback(frame)
-			frame.Unpin()
-			continue
+			return frame, nil
 		}
 	}
 
@@ -96,9 +97,6 @@ func (w *WSClock) SelectVictim(frames []*models.Frame) (*models.Frame, error) {
 	return nil, fmt.Errorf("no evictable frame found")
 }
 
-func (w *WSClock) scheduleWriteback(frame *models.Frame) {
-	frame.ClearReferenceBit()
-}
 
 func (w *WSClock) OnPageAccess(frame *models.Frame, write bool) {
 	frame.Access(write)

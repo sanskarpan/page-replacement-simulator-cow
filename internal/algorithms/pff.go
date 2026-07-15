@@ -45,8 +45,8 @@ func (p *PFF) GetTargetResidentSet() int32 {
 }
 
 func (p *PFF) GetFaultRate() float64 {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	return p.computeFaultRate()
 }
 
@@ -161,8 +161,8 @@ func (p *PFF) Reset() {
 }
 
 func (p *PFF) GetStats() PFFStats {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	return PFFStats{
 		TargetResident: p.targetResident,
 		FaultRate:      p.computeFaultRate(),

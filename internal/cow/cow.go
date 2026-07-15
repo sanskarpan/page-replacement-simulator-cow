@@ -75,21 +75,28 @@ func (cow *CopyOnWrite) SharePage(pageID uint64, frameNumber int32, processIDs [
 // Returns: (needsCopy, newPageID, error)
 func (cow *CopyOnWrite) HandleWrite(pageID uint64, processID string, page *models.Page) (bool, uint64, error) {
 	cow.mu.RLock()
-	sharedPage, isShared := cow.sharedPages[pageID]
+	_, isShared := cow.sharedPages[pageID]
 	cow.mu.RUnlock()
 
-	// If not shared, no copy needed
 	if !isShared || !page.IsShared() {
 		cow.copiesAvoided.Add(1)
 		return false, 0, nil
 	}
 
-	sharedPage.mu.RLock()
-	refCount := sharedPage.RefCount.Load()
-	sharedPage.mu.RUnlock()
+	// Hold the write lock for the entire check-and-decrement so no two
+	// concurrent writers can both see refCount>1 for the same page (TOCTOU fix).
+	cow.mu.Lock()
+	sharedPage, exists := cow.sharedPages[pageID]
+	if !exists {
+		cow.mu.Unlock()
+		cow.copiesAvoided.Add(1)
+		return false, 0, nil
+	}
 
-	// If only one reference, no copy needed - just mark as not shared
+	refCount := sharedPage.RefCount.Load()
 	if refCount <= 1 {
+		// Last reference: take exclusive ownership without copying.
+		cow.mu.Unlock()
 		cow.unsharePageInternal(pageID, processID)
 		page.Shared.Store(false)
 		page.ReadOnly.Store(false)
@@ -97,12 +104,19 @@ func (cow *CopyOnWrite) HandleWrite(pageID uint64, processID string, page *model
 		return false, 0, nil
 	}
 
-	// Multiple references - need to copy
+	// Multiple references: decrement atomically while holding the lock so no
+	// concurrent writer also sees refCount>1 for this process entry.
+	if sharedPage.Processes[processID] {
+		delete(sharedPage.Processes, processID)
+		sharedPage.RefCount.Add(-1)
+		cow.refCounter.Decrement(pageID)
+		if sharedPage.RefCount.Load() <= 0 {
+			delete(cow.sharedPages, pageID)
+		}
+	}
+	cow.mu.Unlock()
+
 	newPageID := cow.nextPageID.Add(1)
-
-	// Decrement reference count for original page
-	cow.decrementRefCount(pageID, processID)
-
 	return true, newPageID, nil
 }
 
