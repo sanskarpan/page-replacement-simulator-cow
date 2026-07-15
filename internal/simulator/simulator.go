@@ -3,13 +3,41 @@ package simulator
 import (
 	"fmt"
 	"math/rand"
+	"sort"
 	"sync"
 	"time"
 
+	"github.com/page-replacement-cow/internal/algorithms"
 	"github.com/page-replacement-cow/internal/memory"
 	"github.com/page-replacement-cow/internal/process"
 	"github.com/page-replacement-cow/pkg/models"
 )
+
+// TraceEntry captures a single memory access for deterministic replay.
+type TraceEntry struct {
+	ProcessID   string
+	VirtualPage uint64
+	Write       bool
+}
+
+// Trace is a recorded sequence of memory accesses.
+type Trace struct {
+	Entries []TraceEntry
+	Seed    int64
+}
+
+// AlgorithmResult holds per-algorithm metrics from a comparison run.
+type AlgorithmResult struct {
+	Rank       int
+	Algorithm  string
+	FaultRate  float64
+	HitRate    float64
+	PageFaults int64
+	PageHits   int64
+	Evictions  int64
+	CoWCopies  int64
+	Duration   time.Duration
+}
 
 type Simulator struct {
 	processManager *process.ProcessManager
@@ -17,6 +45,9 @@ type Simulator struct {
 	seed           int64
 	mu             sync.Mutex
 	scenarioMu     sync.Mutex
+	fastMode       bool         // skip per-access delays when true
+	recording      bool         // whether to append to traceEntries
+	traceEntries   []TraceEntry // populated when recording == true
 }
 
 func NewSimulator(processManager *process.ProcessManager) *Simulator {
@@ -28,12 +59,121 @@ func NewSimulator(processManager *process.ProcessManager) *Simulator {
 	}
 }
 
+// SetFastMode disables the per-access 1ms delay when true, useful for
+// benchmarks and algorithm comparison where wall-clock latency is irrelevant.
+func (s *Simulator) SetFastMode(fast bool) { s.fastMode = fast }
+
+// sleep respects fastMode — skips the delay in comparison/benchmark runs.
+func (s *Simulator) sleep() {
+	if !s.fastMode {
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// accessMemory is a thin wrapper that records the access when tracing is active.
+func (s *Simulator) accessMemory(pid string, page uint64, write bool) error {
+	if s.recording {
+		s.traceEntries = append(s.traceEntries, TraceEntry{ProcessID: pid, VirtualPage: page, Write: write})
+	}
+	return s.processManager.AccessMemory(pid, page, write)
+}
+
+// StartRecording begins capturing all memory accesses made through this simulator.
+func (s *Simulator) StartRecording() {
+	s.traceEntries = make([]TraceEntry, 0, 1024)
+	s.recording = true
+}
+
+// StopRecording stops capture and returns the recorded trace.
+func (s *Simulator) StopRecording() *Trace {
+	s.recording = false
+	t := &Trace{Entries: s.traceEntries, Seed: s.seed}
+	s.traceEntries = nil
+	return t
+}
+
+// ReplayTrace replays a previously recorded trace on the current process manager.
+// Processes referenced by the trace must already exist.
+func (s *Simulator) ReplayTrace(t *Trace) error {
+	for _, e := range t.Entries {
+		if err := s.processManager.AccessMemory(e.ProcessID, e.VirtualPage, e.Write); err != nil {
+			return fmt.Errorf("replay failed at page %d (pid=%s write=%v): %w",
+				e.VirtualPage, e.ProcessID, e.Write, err)
+		}
+		s.sleep()
+	}
+	return nil
+}
+
+// CompareAlgorithms runs scenario on every available algorithm with the same
+// RNG seed and returns results ranked by page fault rate (ascending).
+// numFrames and tlbSize configure each algorithm's memory manager.
+func (s *Simulator) CompareAlgorithms(scenario string, numFrames int32, tlbSize int) ([]AlgorithmResult, error) {
+	allAlgos := []algorithms.AlgorithmType{
+		algorithms.AlgorithmOptimal,
+		algorithms.AlgorithmOPTPlus,
+		algorithms.AlgorithmLRU,
+		algorithms.AlgorithmARC,
+		algorithms.AlgorithmCAR,
+		algorithms.AlgorithmCLOCK,
+		algorithms.AlgorithmWSClock,
+		algorithms.AlgorithmLFU,
+		algorithms.AlgorithmPFF,
+		algorithms.AlgorithmFIFO,
+		algorithms.AlgorithmRandom,
+	}
+
+	results := make([]AlgorithmResult, 0, len(allAlgos))
+
+	for _, algType := range allAlgos {
+		mm := memory.NewMemoryManager(numFrames, tlbSize, algType)
+		pm := process.NewProcessManager(mm)
+
+		sim := &Simulator{
+			processManager: pm,
+			seed:           s.seed,
+			rng:            rand.New(rand.NewSource(s.seed)),
+			fastMode:       true,
+		}
+
+		start := time.Now()
+		_, err := sim.RunScenario(scenario)
+		elapsed := time.Since(start)
+		mm.Close()
+
+		if err != nil {
+			// skip algorithms that error rather than aborting the whole comparison
+			continue
+		}
+
+		m := mm.GetMetrics()
+		results = append(results, AlgorithmResult{
+			Algorithm:  algorithms.GetAlgorithmName(algType),
+			FaultRate:  m.PageFaultRate,
+			HitRate:    m.PageHitRate,
+			PageFaults: m.PageFaults,
+			PageHits:   m.PageHits,
+			Evictions:  m.Evictions,
+			CoWCopies:  m.CoWCopies,
+			Duration:   elapsed,
+		})
+	}
+
+	sort.Slice(results, func(i, j int) bool {
+		return results[i].FaultRate < results[j].FaultRate
+	})
+	for i := range results {
+		results[i].Rank = i + 1
+	}
+	return results, nil
+}
+
 func (s *Simulator) SimulateSequentialAccess(pid string, startPage, numPages uint64, write bool) error {
 	for i := uint64(0); i < numPages; i++ {
-		if err := s.processManager.AccessMemory(pid, startPage+i, write); err != nil {
+		if err := s.accessMemory(pid, startPage+i, write); err != nil {
 			return fmt.Errorf("sequential access failed at page %d: %v", startPage+i, err)
 		}
-		time.Sleep(1 * time.Millisecond)
+		s.sleep()
 	}
 	return nil
 }
@@ -46,10 +186,10 @@ func (s *Simulator) SimulateRandomAccess(pid string, maxPage uint64, numAccesses
 		page := uint64(s.rng.Intn(int(maxPage)))
 		write := s.rng.Float64() < writeRatio
 
-		if err := s.processManager.AccessMemory(pid, page, write); err != nil {
+		if err := s.accessMemory(pid, page, write); err != nil {
 			return fmt.Errorf("random access failed at page %d: %v", page, err)
 		}
-		time.Sleep(1 * time.Millisecond)
+		s.sleep()
 	}
 	return nil
 }
@@ -76,10 +216,10 @@ func (s *Simulator) SimulateLocalityAccess(pid string, workingSetSize uint64, nu
 
 		write := s.rng.Float64() < writeRatio
 
-		if err := s.processManager.AccessMemory(pid, page, write); err != nil {
+		if err := s.accessMemory(pid, page, write); err != nil {
 			return fmt.Errorf("locality access failed at page %d: %v", page, err)
 		}
-		time.Sleep(1 * time.Millisecond)
+		s.sleep()
 	}
 	return nil
 }
@@ -88,10 +228,10 @@ func (s *Simulator) SimulateLoopingAccess(pid string, loopSize uint64, numIterat
 	for iter := 0; iter < numIterations; iter++ {
 		for i := uint64(0); i < loopSize; i++ {
 			write := s.rng.Float64() < writeRatio
-			if err := s.processManager.AccessMemory(pid, i, write); err != nil {
+			if err := s.accessMemory(pid, i, write); err != nil {
 				return fmt.Errorf("looping access failed at page %d: %v", i, err)
 			}
-			time.Sleep(1 * time.Millisecond)
+			s.sleep()
 		}
 	}
 	return nil
@@ -100,10 +240,10 @@ func (s *Simulator) SimulateLoopingAccess(pid string, loopSize uint64, numIterat
 func (s *Simulator) SimulateCustomPattern(pid string, pages []uint64, writePages map[uint64]bool) error {
 	for _, page := range pages {
 		write := writePages[page]
-		if err := s.processManager.AccessMemory(pid, page, write); err != nil {
+		if err := s.accessMemory(pid, page, write); err != nil {
 			return fmt.Errorf("custom pattern access failed at page %d: %v", page, err)
 		}
-		time.Sleep(1 * time.Millisecond)
+		s.sleep()
 	}
 	return nil
 }

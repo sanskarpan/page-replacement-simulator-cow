@@ -12,16 +12,24 @@ import (
 )
 
 func main() {
-	// Parse flags
 	numFrames := flag.Int("frames", 64, "Number of physical memory frames")
 	tlbSize := flag.Int("tlb", 16, "TLB size")
 	algo := flag.String("algorithm", "LRU", "Page replacement algorithm (LRU, CLOCK, LFU, FIFO, Optimal, Random, ARC, CAR, WSClock, PFF, OPT+)")
-	scenario := flag.String("scenario", "mixed", "Simulation scenario to run")
+	scenario := flag.String("scenario", "mixed", "Simulation scenario (sequential, random, locality, looping, mixed, fork_cow, thrashing)")
+	compare := flag.Bool("compare", false, "Compare all algorithms on the chosen scenario and rank them")
 	flag.Parse()
 
-	// Parse algorithm
+	if *compare {
+		runComparison(*scenario, int32(*numFrames), *tlbSize)
+		return
+	}
+
+	runSingle(*algo, *scenario, int32(*numFrames), *tlbSize)
+}
+
+func runSingle(algo, scenario string, numFrames int32, tlbSize int) {
 	var algType algorithms.AlgorithmType
-	switch *algo {
+	switch algo {
 	case "LRU":
 		algType = algorithms.AlgorithmLRU
 	case "CLOCK":
@@ -45,74 +53,94 @@ func main() {
 	case "OPT+":
 		algType = algorithms.AlgorithmOPTPlus
 	default:
-		log.Fatalf("Invalid algorithm: %s", *algo)
+		log.Fatalf("Invalid algorithm: %s", algo)
 	}
 
-	// Create system
-	mm := memory.NewMemoryManager(int32(*numFrames), *tlbSize, algType)
+	mm := memory.NewMemoryManager(numFrames, int(tlbSize), algType)
+	defer mm.Close()
 	pm := process.NewProcessManager(mm)
 	sim := simulator.NewSimulator(pm)
 
-	// Print header
 	fmt.Println("========================================")
 	fmt.Println("Page Replacement Simulator + CoW")
 	fmt.Println("========================================")
-	fmt.Printf("Frames: %d\n", *numFrames)
-	fmt.Printf("TLB Size: %d\n", *tlbSize)
-	fmt.Printf("Algorithm: %s\n", *algo)
-	fmt.Printf("Scenario: %s\n", *scenario)
+	fmt.Printf("Frames: %d | TLB: %d | Algorithm: %s | Scenario: %s\n",
+		numFrames, tlbSize, algo, scenario)
 	fmt.Println("========================================")
-	fmt.Println()
 
-	// Run scenario
-	fmt.Printf("Running scenario: %s\n", *scenario)
-	fmt.Printf("Description: %s\n\n", sim.GetScenarioDescription(*scenario))
-
-	result, err := sim.RunScenario(*scenario)
+	result, err := sim.RunScenario(scenario)
 	if err != nil {
 		log.Fatalf("Scenario failed: %v", err)
 	}
 
-	// Print results
 	fmt.Println("\n========================================")
 	fmt.Println("Simulation Results")
 	fmt.Println("========================================")
 	fmt.Printf("Duration: %v\n", result.Duration)
-	fmt.Printf("Success: %v\n", result.Success)
 
-	if result.Metrics != nil {
-		m := result.Metrics
-
-		fmt.Println("\nMetrics:")
-		fmt.Printf("  Total Accesses: %d\n", m.TotalAccesses)
-		fmt.Printf("  Page Faults: %d\n", m.PageFaults)
-		fmt.Printf("  Page Hits: %d\n", m.PageHits)
+	if m := result.Metrics; m != nil {
+		fmt.Printf("\n  Accesses : %d\n", m.TotalAccesses)
+		fmt.Printf("  Faults   : %d  (%.2f%%)\n", m.PageFaults, m.PageFaultRate*100)
+		fmt.Printf("  Hits     : %d  (%.2f%%)\n", m.PageHits, m.PageHitRate*100)
 		fmt.Printf("  Evictions: %d\n", m.Evictions)
-		fmt.Printf("  Page Fault Rate: %.2f%%\n", m.PageFaultRate*100)
-		fmt.Printf("  Page Hit Rate: %.2f%%\n", m.PageHitRate*100)
-
-		fmt.Println("\nMemory:")
-		fmt.Printf("  Total Frames: %d\n", m.TotalFrames)
-		fmt.Printf("  Used Frames: %d\n", m.UsedFrames)
-		fmt.Printf("  Free Frames: %d\n", m.FreeFrames)
-		fmt.Printf("  Memory Usage: %.1f%%\n", float64(m.UsedFrames)/float64(m.TotalFrames)*100)
-
-		fmt.Println("\nPages:")
-		fmt.Printf("  Pages in Memory: %d\n", m.PagesInMemory)
-		fmt.Printf("  Shared Pages: %d\n", m.SharedPages)
-		fmt.Printf("  Dirty Pages: %d\n", m.DirtyPages)
-
+		fmt.Printf("\n  Frames   : %d used / %d total\n", m.UsedFrames, m.TotalFrames)
 		if m.CoWCopies > 0 {
-			fmt.Println("\nCopy-on-Write:")
-			fmt.Printf("  Copies Created: %d\n", m.CoWCopies)
-			fmt.Printf("  Copies Avoided: %d\n", m.CoWSaves)
-			fmt.Printf("  Shared Reads: %d\n", m.SharedPageReads)
+			fmt.Printf("  CoW copies created: %d  avoided: %d\n", m.CoWCopies, m.CoWSaves)
 		}
+	}
+	fmt.Println("========================================")
+}
 
-		fmt.Println("\nProcesses:")
-		fmt.Printf("  Active: %d\n", m.ActiveProcesses)
-		fmt.Printf("  Total: %d\n", m.TotalProcesses)
+func runComparison(scenario string, numFrames int32, tlbSize int) {
+	// Seed once from the system clock and reuse across all algorithms so the
+	// comparison is fair (same random workload for every algorithm).
+	mm0 := memory.NewMemoryManager(numFrames, int(tlbSize), algorithms.AlgorithmLRU)
+	pm0 := process.NewProcessManager(mm0)
+	seedSim := simulator.NewSimulator(pm0)
+	mm0.Close()
+
+	fmt.Println("=======================================================================")
+	fmt.Printf("Algorithm Comparison: scenario=%s  frames=%d  tlb=%d\n",
+		scenario, numFrames, tlbSize)
+	fmt.Println("=======================================================================")
+	fmt.Println("Running all 11 algorithms with the same workload seed...")
+
+	results, err := seedSim.CompareAlgorithms(scenario, numFrames, int(tlbSize))
+	if err != nil {
+		log.Fatalf("Comparison failed: %v", err)
 	}
 
-	fmt.Println("========================================")
+	if len(results) == 0 {
+		fmt.Println("No results (all algorithms errored).")
+		return
+	}
+
+	// Print ranked table.
+	fmt.Println()
+	fmt.Printf("%-4s  %-10s  %10s  %10s  %8s  %9s  %7s  %s\n",
+		"Rank", "Algorithm", "FaultRate%", "HitRate%", "Faults", "Evictions", "CoW", "Time")
+	fmt.Println("----  ----------  ----------  ----------  --------  ---------  -------  --------")
+
+	best := results[0].FaultRate
+	for _, r := range results {
+		marker := ""
+		if r.FaultRate == best {
+			marker = " ★"
+		}
+		fmt.Printf("#%-3d  %-10s  %9.2f%%  %9.2f%%  %8d  %9d  %7d  %v%s\n",
+			r.Rank,
+			r.Algorithm,
+			r.FaultRate*100,
+			r.HitRate*100,
+			r.PageFaults,
+			r.Evictions,
+			r.CoWCopies,
+			r.Duration.Round(1*1000*1000), // round to ms
+			marker,
+		)
+	}
+
+	fmt.Println("=======================================================================")
+	fmt.Printf("Winner: %s (fault rate %.2f%% on '%s' scenario)\n",
+		results[0].Algorithm, results[0].FaultRate*100, scenario)
 }

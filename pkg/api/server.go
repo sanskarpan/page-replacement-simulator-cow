@@ -57,6 +57,7 @@ func NewServer(numFrames int32, tlbSize int, algType algorithms.AlgorithmType) *
 func (s *Server) Shutdown() {
 	close(s.monitorStop)
 	close(s.broadcast)
+	s.memoryManager.Close()
 }
 
 // handleBroadcast handles broadcasting messages to all WebSocket clients

@@ -29,6 +29,7 @@ type MemoryManager struct {
 	eventCallback   func(event string, data map[string]interface{})
 	eventCallbackMu sync.RWMutex // separate lock so eventWorker never blocks under mm.mu
 	eventCh         chan eventMsg
+	closeOnce       sync.Once // guards Close() idempotency
 
 	numaManager          *NumaManager
 	compressionManager   *CompressionManager
@@ -640,6 +641,13 @@ func (mm *MemoryManager) SetEventCallback(callback func(event string, data map[s
 	mm.eventCallbackMu.Unlock()
 }
 
+// Close stops the background event worker. Safe to call multiple times.
+// After Close, emitEvent calls are no-ops (sends to a closed channel are
+// caught by recover). Managers created in tests should defer mm.Close().
+func (mm *MemoryManager) Close() {
+	mm.closeOnce.Do(func() { close(mm.eventCh) })
+}
+
 func (mm *MemoryManager) emitEvent(event string, data map[string]interface{}) {
 	mm.eventCallbackMu.RLock()
 	cb := mm.eventCallback
@@ -647,6 +655,9 @@ func (mm *MemoryManager) emitEvent(event string, data map[string]interface{}) {
 	if cb == nil {
 		return
 	}
+	// recover catches the "send on closed channel" panic that can occur if
+	// Close() is called concurrently with an in-flight emitEvent.
+	defer func() { recover() }() //nolint:errcheck
 	select {
 	case mm.eventCh <- eventMsg{event: event, data: data}:
 	default:
