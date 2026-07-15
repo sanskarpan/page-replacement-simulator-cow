@@ -278,3 +278,122 @@ All 15 bugs found in the July 2026 codebase audit. Each entry includes severity,
 | BUG-13 | HIGH | Race+Logic | memory/advanced.go | ✅ |
 | BUG-14 | MEDIUM | Logic | memory/advanced.go | ✅ |
 | BUG-15 | LOW | Perf | memory/manager.go | ✅ |
+
+---
+
+## Round-2 Audit — 7 new bugs fixed (July 2026)
+
+| ID | Severity | Category | File | Status |
+|----|----------|----------|------|--------|
+| BUG-16 | CRITICAL | Concurrency | cow/cow.go | ✅ |
+| BUG-17 | CRITICAL | Data Corruption | memory/manager.go | ✅ |
+| BUG-18 | HIGH | Data Race | memory/manager.go | ✅ |
+| BUG-19 | CRITICAL | Panic | api/server.go | ✅ |
+| BUG-20 | CRITICAL | Panic | api/websocket.go | ✅ |
+| BUG-21 | MEDIUM | Goroutine Leak | api/websocket.go | ✅ |
+| BUG-22 | HIGH | Logic | algorithms/car.go | ✅ |
+
+---
+
+## BUG-16 — HandleWrite TOCTOU: unlock before `unsharePageInternal` re-lock
+
+| Field | Value |
+|-------|-------|
+| **Severity** | CRITICAL |
+| **Category** | Concurrency / TOCTOU |
+| **File** | `internal/cow/cow.go:97–100` |
+| **Status** | Fixed ✅ |
+
+**Description:** After BUG-01's fix, `HandleWrite` still released `cow.mu` before calling `unsharePageInternal`, which immediately re-acquired it. Between the unlock and re-lock, a concurrent `ForkProcess` could add a new sharer; the process that decided it was the "last reference" would then write directly to the shared frame, corrupting the new sharer's view.
+
+**Fix:** Inline the unshare logic directly under the already-held `cow.mu.Lock()`, eliminating the unlock-relock window entirely.
+
+---
+
+## BUG-17 — Compressed path missing CoW check for writes to shared pages
+
+| Field | Value |
+|-------|-------|
+| **Severity** | CRITICAL |
+| **Category** | Data Corruption |
+| **File** | `internal/memory/manager.go:342–357` |
+| **Status** | Fixed ✅ |
+
+**Description:** When `compressionEnabled` is true and a page is decompressed (fault handler enters the compressed branch), the function returned `nil` unconditionally without checking `write && page.IsShared()`. A write to a shared compressed page bypassed `handleCoW` entirely, letting the writer modify the shared frame and silently corrupting other processes' view. Also, the NUMA node assignment was missing from the `AllocateFrame`-succeeds branch inside the compressed path.
+
+**Fix:** Added `if write && page.IsShared()` CoW dispatch and NUMA node stamp before the `return nil` in the compressed branch.
+
+---
+
+## BUG-18 — Data race on `mm.eventCallback` in `eventWorker`
+
+| Field | Value |
+|-------|-------|
+| **Severity** | HIGH |
+| **Category** | Data Race |
+| **File** | `internal/memory/manager.go:625–649` |
+| **Status** | Fixed ✅ |
+
+**Description:** `eventWorker` (goroutine, no lock) and `emitEvent` (called under various states of `mm.mu`) both read `mm.eventCallback` without synchronization. `SetEventCallback` wrote it under `mm.mu.Lock()`. The Go race detector flags this because `eventWorker` never acquires `mm.mu`.
+
+**Fix:** Added `eventCallbackMu sync.RWMutex` — a dedicated lock whose only job is protecting `mm.eventCallback`. `SetEventCallback` uses `eventCallbackMu.Lock()`. Both `emitEvent` and `eventWorker` read under `eventCallbackMu.RLock()`. Lock order `mm.mu → eventCallbackMu` is safe since `eventCallbackMu` is never held when `mm.mu` is acquired.
+
+---
+
+## BUG-19 — WebSocket double-close panic in `handleBroadcast`
+
+| Field | Value |
+|-------|-------|
+| **Severity** | CRITICAL |
+| **Category** | Panic / Concurrency |
+| **File** | `pkg/api/server.go:67–85` |
+| **Status** | Fixed ✅ |
+
+**Description:** `handleBroadcast` closed `client.send` under `clientsMu.RLock()` (line 72) and only deleted the client from the map later under `clientsMu.Lock()`. Between those two operations, `UnregisterClient` could acquire `clientsMu.Lock()`, find the client still in the map, and close the already-closed channel → `close of closed channel` panic.
+
+**Fix:** Removed the close from the RLock section. Dead clients are now only closed+deleted inside the WLock section with an existence check, mirroring `UnregisterClient`.
+
+---
+
+## BUG-20 — WebSocket initial-state goroutine sends to closed channel
+
+| Field | Value |
+|-------|-------|
+| **Severity** | CRITICAL |
+| **Category** | Panic |
+| **File** | `pkg/api/websocket.go:50–56` |
+| **Status** | Fixed ✅ |
+
+**Description:** `HandleWebSocket` spawns a goroutine that sleeps 100 ms then sends to `client.send`. If the client disconnects within that window, `UnregisterClient` closes `client.send`. The goroutine wakes up and sends to the closed channel → panic.
+
+**Fix:** The goroutine now uses two nested `select` statements: one to wait out the timer (or abort on `client.done` closure), and one to send (or abort if `client.done` closed first).
+
+---
+
+## BUG-21 — Unlimited `sendPeriodicMetrics` goroutines per WebSocket client
+
+| Field | Value |
+|-------|-------|
+| **Severity** | MEDIUM |
+| **Category** | Goroutine Leak |
+| **File** | `pkg/api/websocket.go:144–146` |
+| **Status** | Fixed ✅ |
+
+**Description:** Every `subscribe_metrics` WebSocket message spawned a new `sendPeriodicMetrics` goroutine with no deduplication. A replaying or misbehaving client could accumulate unbounded goroutines, all writing to the same `client.send` channel.
+
+**Fix:** Added `metricsStarted int32` atomic field to `Client`. `handleMessage` uses `atomic.CompareAndSwapInt32` to ensure only the first `subscribe_metrics` message per connection spawns the goroutine.
+
+---
+
+## BUG-22 — CAR `SelectVictim` loop bound shrinks as T1 entries are promoted
+
+| Field | Value |
+|-------|-------|
+| **Severity** | HIGH |
+| **Category** | Logic / Algorithm |
+| **File** | `internal/algorithms/car.go:56–78` |
+| **Status** | Fixed ✅ |
+
+**Description:** The T1 scan loop used `len(c.t1)*2` as the bound, but Go re-evaluates this expression on every iteration. As entries with `refBit=true` are promoted to T2 (via `moveT1ToT2` → `removeT1`), `len(c.t1)` decreases, shrinking the effective bound mid-scan. The scan exits early, leaving valid clean eviction candidates in T1 permanently skipped. The same bug existed in the T2 scan.
+
+**Fix:** Captured `maxT1Iters := len(c.t1) * 2` (and `maxT2Iters`) before each loop so the bound is fixed for the full scan. Added `if len(c.t1) == 0 { break }` guard inside the loop to handle the case where all entries are promoted.

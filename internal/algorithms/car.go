@@ -53,7 +53,14 @@ func (c *CAR) SelectVictim(frames []*models.Frame) (*models.Frame, error) {
 	defer c.mu.Unlock()
 
 	if len(c.t1) > 0 && c.t1Count > 0 {
-		for i := 0; i < len(c.t1)*2; i++ {
+		// Capture the bound before the loop: len(c.t1) shrinks as entries are
+		// promoted to T2, so a re-evaluated bound would cut the scan short and
+		// cause valid T1 candidates to be skipped.
+		maxT1Iters := len(c.t1) * 2
+		for i := 0; i < maxT1Iters; i++ {
+			if len(c.t1) == 0 {
+				break
+			}
 			c.t1Hand = c.t1Hand % len(c.t1)
 			if c.t1Hand < 0 {
 				c.t1Hand = 0
@@ -79,7 +86,11 @@ func (c *CAR) SelectVictim(frames []*models.Frame) (*models.Frame, error) {
 	}
 
 	if len(c.t2) > 0 && c.t2Count > 0 {
-		for i := 0; i < len(c.t2)*2; i++ {
+		maxT2Iters := len(c.t2) * 2
+		for i := 0; i < maxT2Iters; i++ {
+			if len(c.t2) == 0 {
+				break
+			}
 			c.t2Hand = c.t2Hand % len(c.t2)
 			if c.t2Hand < 0 {
 				c.t2Hand = 0

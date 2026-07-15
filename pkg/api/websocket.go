@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -19,10 +20,11 @@ var upgrader = websocket.Upgrader{
 
 // Client represents a WebSocket client
 type Client struct {
-	server *Server
-	conn   *websocket.Conn
-	send   chan interface{}
-	done   chan struct{}
+	server         *Server
+	conn           *websocket.Conn
+	send           chan interface{}
+	done           chan struct{}
+	metricsStarted int32 // atomic flag — ensures only one sendPeriodicMetrics goroutine per client
 }
 
 // HandleWebSocket handles WebSocket connections
@@ -46,12 +48,21 @@ func (s *Server) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	go client.writePump()
 	go client.readPump()
 
-	// Send initial state
+	// Send initial state — guard against the client disconnecting within the delay.
 	go func() {
-		time.Sleep(100 * time.Millisecond)
-		client.send <- map[string]interface{}{
+		timer := time.NewTimer(100 * time.Millisecond)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+		case <-client.done:
+			return
+		}
+		select {
+		case client.send <- map[string]interface{}{
 			"type":   "initial_state",
 			"status": s.monitor.GetSystemStatus(),
+		}:
+		case <-client.done:
 		}
 	}()
 }
@@ -142,8 +153,10 @@ func (c *Client) handleMessage(message []byte) {
 
 	switch msgType {
 	case "subscribe_metrics":
-		// Start sending periodic metric updates
-		go c.sendPeriodicMetrics()
+		// One metrics goroutine per client — idempotent via atomic CAS.
+		if atomic.CompareAndSwapInt32(&c.metricsStarted, 0, 1) {
+			go c.sendPeriodicMetrics()
+		}
 
 	case "request_state":
 		// Send current state

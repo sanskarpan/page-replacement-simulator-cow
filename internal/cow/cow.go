@@ -96,8 +96,18 @@ func (cow *CopyOnWrite) HandleWrite(pageID uint64, processID string, page *model
 	refCount := sharedPage.RefCount.Load()
 	if refCount <= 1 {
 		// Last reference: take exclusive ownership without copying.
+		// Inline the unshare while still holding cow.mu to close the TOCTOU
+		// window where a concurrent ForkProcess could add a new sharer between
+		// our Unlock() and unsharePageInternal's re-Lock().
+		if sharedPage.Processes[processID] {
+			delete(sharedPage.Processes, processID)
+			sharedPage.RefCount.Add(-1)
+			cow.refCounter.Decrement(pageID)
+			if sharedPage.RefCount.Load() <= 0 {
+				delete(cow.sharedPages, pageID)
+			}
+		}
 		cow.mu.Unlock()
-		cow.unsharePageInternal(pageID, processID)
 		page.Shared.Store(false)
 		page.ReadOnly.Store(false)
 		cow.copiesAvoided.Add(1)

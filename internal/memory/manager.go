@@ -26,8 +26,9 @@ type MemoryManager struct {
 	metrics       *models.Metrics
 	processes     map[string]*models.Process
 	mu            sync.RWMutex
-	eventCallback func(event string, data map[string]interface{})
-	eventCh       chan eventMsg
+	eventCallback   func(event string, data map[string]interface{})
+	eventCallbackMu sync.RWMutex // separate lock so eventWorker never blocks under mm.mu
+	eventCh         chan eventMsg
 
 	numaManager          *NumaManager
 	compressionManager   *CompressionManager
@@ -349,9 +350,20 @@ func (mm *MemoryManager) handlePageFault(processID string, page *models.Page, wr
 					return fmt.Errorf("handlePageFault (compressed): %w", evErr)
 				}
 			} else {
+				if mm.numaEnabled {
+					frame.NumaNodeID = mm.selectLocalNode(processID)
+				}
 				page.SetFrame(frame.ID)
 				mm.algorithm.OnPageFault(frame)
 				mm.tlb.Insert(processID, page.ID, frame.ID)
+			}
+			// A write to a shared compressed page must still trigger CoW so the
+			// writer gets its own private copy rather than corrupting the shared frame.
+			if write && page.IsShared() {
+				f, err := mm.frameTable.GetFrame(page.GetFrame())
+				if err == nil && f != nil {
+					return mm.handleCoW(processID, page, f)
+				}
 			}
 			return nil
 		}
@@ -623,13 +635,16 @@ func (mm *MemoryManager) GetAlgorithm() algorithms.PageReplacementAlgorithm {
 }
 
 func (mm *MemoryManager) SetEventCallback(callback func(event string, data map[string]interface{})) {
-	mm.mu.Lock()
-	defer mm.mu.Unlock()
+	mm.eventCallbackMu.Lock()
 	mm.eventCallback = callback
+	mm.eventCallbackMu.Unlock()
 }
 
 func (mm *MemoryManager) emitEvent(event string, data map[string]interface{}) {
-	if mm.eventCallback == nil {
+	mm.eventCallbackMu.RLock()
+	cb := mm.eventCallback
+	mm.eventCallbackMu.RUnlock()
+	if cb == nil {
 		return
 	}
 	select {
@@ -642,7 +657,9 @@ func (mm *MemoryManager) emitEvent(event string, data map[string]interface{}) {
 func (mm *MemoryManager) eventWorker(ch chan eventMsg) {
 	// ch is captured by value so this goroutine never reads mm.eventCh field.
 	for msg := range ch {
+		mm.eventCallbackMu.RLock()
 		cb := mm.eventCallback
+		mm.eventCallbackMu.RUnlock()
 		if cb != nil {
 			cb(msg.event, msg.data)
 		}

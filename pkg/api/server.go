@@ -69,7 +69,8 @@ func (s *Server) handleBroadcast() {
 			select {
 			case client.send <- message:
 			default:
-				close(client.send)
+				// Mark dead but do NOT close here — closing under RLock races
+				// with UnregisterClient's close under WLock (double-close panic).
 				deadClients = append(deadClients, client)
 			}
 		}
@@ -78,7 +79,11 @@ func (s *Server) handleBroadcast() {
 		if len(deadClients) > 0 {
 			s.clientsMu.Lock()
 			for _, client := range deadClients {
-				delete(s.clients, client)
+				// Guard: UnregisterClient may have already closed and removed this client.
+				if _, ok := s.clients[client]; ok {
+					close(client.send)
+					delete(s.clients, client)
+				}
 			}
 			s.clientsMu.Unlock()
 		}
