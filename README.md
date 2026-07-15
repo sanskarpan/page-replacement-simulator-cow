@@ -63,7 +63,7 @@ Page-Replacement-Simulator-CoW/
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/page-replacement-cow.git
+git clone https://github.com/sanskarpan/page-replacement-cow.git
 cd page-replacement-cow
 
 # Install dependencies
@@ -339,10 +339,3 @@ Potential improvements:
 - [ ] Memory compression
 - [ ] Page clustering
 
-## Support
-
-For questions or issues, please open a GitHub issue.
-
-## Authors
-
-Created as a comprehensive virtual memory simulation and learning tool.
