@@ -36,9 +36,12 @@ func NewTLB(capacity int) *TLB {
 	return tlb
 }
 
-// makeKey creates a key for the TLB entry
+// makeKey creates a collision-free key for the TLB entry.
+// A null-byte separator is used because process IDs cannot contain null bytes,
+// eliminating any ambiguity that a printable separator (e.g. ':') would allow
+// when the separator character appears in a processID.
 func (t *TLB) makeKey(processID string, virtualPage uint64) string {
-	return processID + ":" + strconv.FormatUint(virtualPage, 10)
+	return processID + "\x00" + strconv.FormatUint(virtualPage, 10)
 }
 
 // Lookup looks up a virtual page in the TLB.
@@ -73,8 +76,9 @@ func (t *TLB) Insert(processID string, virtualPage uint64, frameNumber int32) {
 
 	key := t.makeKey(processID, virtualPage)
 
-	// If at capacity, evict an entry (simple LRU)
-	if len(t.entries) >= t.capacity {
+	// If at capacity, evict an entry (simple LRU).
+	// capacity == 0 is treated as unlimited: never evict.
+	if t.capacity > 0 && len(t.entries) >= t.capacity {
 		t.evictLRU()
 	}
 

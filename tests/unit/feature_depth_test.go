@@ -319,7 +319,7 @@ func TestNUMAFrameLocalityAfterEnable(t *testing.T) {
 	// Determine which node this process maps to: selectLocalNode hashes processID % 2.
 	// We cannot call it directly, but we can observe frame IDs: node 0 → [0,8), node 1 → [8,16).
 	for _, f := range frames {
-		nodeID := f.NumaNodeID
+		nodeID := f.GetNumaNodeID()
 		framesPerNode := int32(16 / 2)
 		expectedStart := nodeID * framesPerNode
 		expectedEnd := expectedStart + framesPerNode

@@ -190,34 +190,8 @@ func (s *Server) HandleSetAlgorithm(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var algType algorithms.AlgorithmType
-
-	switch req.Algorithm {
-	case "LRU":
-		algType = algorithms.AlgorithmLRU
-	case "CLOCK":
-		algType = algorithms.AlgorithmCLOCK
-	case "LFU":
-		algType = algorithms.AlgorithmLFU
-	case "FIFO":
-		algType = algorithms.AlgorithmFIFO
-	case "Optimal":
-		algType = algorithms.AlgorithmOptimal
-	case "Random":
-		algType = algorithms.AlgorithmRandom
-	case "ARC":
-		algType = algorithms.AlgorithmARC
-	case "CAR":
-		algType = algorithms.AlgorithmCAR
-	case "WSClock":
-		algType = algorithms.AlgorithmWSClock
-	case "PFF":
-		algType = algorithms.AlgorithmPFF
-	case "OPT+":
-		algType = algorithms.AlgorithmOPTPlus
-	case "NRU":
-		algType = algorithms.AlgorithmNRU
-	default:
+	algType, ok := algorithms.ParseAlgorithmType(req.Algorithm)
+	if !ok {
 		writeError(w, http.StatusBadRequest, "invalid algorithm")
 		return
 	}

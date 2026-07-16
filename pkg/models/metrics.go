@@ -144,9 +144,13 @@ func (m *Metrics) GetPageHitRate() float64 {
 	return float64(hits) / float64(accesses)
 }
 
-// GetUptime returns the system uptime
+// GetUptime returns the system uptime.
+// StartTime is read under m.mu to avoid a data race with Reset().
 func (m *Metrics) GetUptime() time.Duration {
-	return time.Since(m.StartTime)
+	m.mu.RLock()
+	t := m.StartTime
+	m.mu.RUnlock()
+	return time.Since(t)
 }
 
 // GetSnapshot returns a snapshot of current metrics

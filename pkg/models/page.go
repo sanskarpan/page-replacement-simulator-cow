@@ -70,8 +70,10 @@ func (p *Page) Access(write bool) {
 
 	if write {
 		p.Dirty.Store(true)
-		// Update state to dirty
-		p.State.CompareAndSwap(int32(PageValid), int32(PageDirty))
+		// Attempt transition from Valid first, then Shared.
+		if !p.State.CompareAndSwap(int32(PageValid), int32(PageDirty)) {
+			p.State.CompareAndSwap(int32(PageShared), int32(PageDirty))
+		}
 	}
 }
 
@@ -142,9 +144,17 @@ func (p *Page) IncrementRefCount() int32 {
 	return p.RefCount.Add(1)
 }
 
-// DecrementRefCount decrements reference count
+// DecrementRefCount decrements reference count, clamping at zero to prevent underflow.
 func (p *Page) DecrementRefCount() int32 {
-	return p.RefCount.Add(-1)
+	for {
+		cur := p.RefCount.Load()
+		if cur <= 0 {
+			return 0
+		}
+		if p.RefCount.CompareAndSwap(cur, cur-1) {
+			return cur - 1
+		}
+	}
 }
 
 // GetRefCount returns current reference count

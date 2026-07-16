@@ -106,7 +106,10 @@ func (nm *NumaManager) GetNodes() []*models.NumaNode {
 	nm.mu.RLock()
 	defer nm.mu.RUnlock()
 	result := make([]*models.NumaNode, len(nm.nodes))
-	copy(result, nm.nodes)
+	for i, n := range nm.nodes {
+		nodeCopy := *n
+		result[i] = &nodeCopy
+	}
 	return result
 }
 

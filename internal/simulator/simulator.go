@@ -336,6 +336,9 @@ func (s *Simulator) SimulateLocalityAccess(pid string, workingSetSize uint64, nu
 }
 
 func (s *Simulator) SimulateLoopingAccess(pid string, loopSize uint64, numIterations int, writeRatio float64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	for iter := 0; iter < numIterations; iter++ {
 		for i := uint64(0); i < loopSize; i++ {
 			write := s.rng.Float64() < writeRatio

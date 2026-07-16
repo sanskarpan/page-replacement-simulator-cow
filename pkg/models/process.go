@@ -123,6 +123,18 @@ func (p *Process) AddChild(childID string) {
 	p.Children = append(p.Children, childID)
 }
 
+// RemoveChild removes a child process ID (for fork rollback)
+func (p *Process) RemoveChild(childID string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for i, id := range p.Children {
+		if id == childID {
+			p.Children = append(p.Children[:i], p.Children[i+1:]...)
+			return
+		}
+	}
+}
+
 // GetChildren returns all child process IDs
 func (p *Process) GetChildren() []string {
 	p.mu.RLock()

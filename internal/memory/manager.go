@@ -439,7 +439,7 @@ func (mm *MemoryManager) atomicEvictAndAlloc(page *models.Page, processID string
 	frame := victim
 	frame.Allocate(page.ID, processID)
 	if mm.numaEnabled {
-		frame.NumaNodeID = mm.selectLocalNode(processID)
+		frame.SetNumaNodeID(mm.selectLocalNode(processID))
 	}
 	page.SetFrame(frame.ID)
 	if mpt, ok := mm.multiLevelPT[processID]; ok {
@@ -482,7 +482,7 @@ func (mm *MemoryManager) handleCoW(processID string, page *models.Page, frame *m
 	}
 
 	if mm.numaEnabled {
-		newFrame.NumaNodeID = mm.selectLocalNode(processID)
+		newFrame.SetNumaNodeID(mm.selectLocalNode(processID))
 	}
 
 	// Register the new CoW frame with the replacement algorithm so ARC/CAR
@@ -767,12 +767,19 @@ func hashString(s string) uint64 {
 func (mm *MemoryManager) allocateFrameForPage(pageID uint64, processID string) (*models.Frame, error) {
 	if mm.numaEnabled {
 		nodeID := mm.selectLocalNode(processID)
-		framesPerNode := mm.numFrames / 2
-		start := nodeID * framesPerNode
-		end := start + framesPerNode
+		node0End := mm.numFrames / 2
+		node1End := mm.numFrames
+		var start, end int32
+		if nodeID == 0 {
+			start = 0
+			end = node0End
+		} else {
+			start = node0End
+			end = node1End
+		}
 		frame, err := mm.frameTable.AllocateFrameInRange(start, end, pageID, processID)
 		if err == nil {
-			frame.NumaNodeID = nodeID
+			frame.SetNumaNodeID(nodeID)
 			return frame, nil
 		}
 		// NUMA node full — fall through to global allocation

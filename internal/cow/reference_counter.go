@@ -27,10 +27,9 @@ func (rc *ReferenceCounter) Increment(pageID uint64) int32 {
 		counter = &atomic.Int32{}
 		rc.counts[pageID] = counter
 	}
-	rc.mu.Unlock()
-
 	newCount := counter.Add(1)
 	rc.totalRefs.Add(1)
+	rc.mu.Unlock()
 	return newCount
 }
 

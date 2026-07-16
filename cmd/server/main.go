@@ -39,34 +39,10 @@ func main() {
 		log.Fatalf("--tlb must be between 1 and 65536, got %d", *tlbSize)
 	}
 
-	var algType algorithms.AlgorithmType
-	switch *algo {
-	case "LRU":
-		algType = algorithms.AlgorithmLRU
-	case "CLOCK":
-		algType = algorithms.AlgorithmCLOCK
-	case "LFU":
-		algType = algorithms.AlgorithmLFU
-	case "FIFO":
-		algType = algorithms.AlgorithmFIFO
-	case "Optimal":
-		algType = algorithms.AlgorithmOptimal
-	case "Random":
-		algType = algorithms.AlgorithmRandom
-	case "ARC":
-		algType = algorithms.AlgorithmARC
-	case "CAR":
-		algType = algorithms.AlgorithmCAR
-	case "WSClock":
-		algType = algorithms.AlgorithmWSClock
-	case "PFF":
-		algType = algorithms.AlgorithmPFF
-	case "OPT+":
-		algType = algorithms.AlgorithmOPTPlus
-	case "NRU":
-		algType = algorithms.AlgorithmNRU
-	default:
-		log.Fatalf("Invalid algorithm: %s. Valid values: LRU, CLOCK, LFU, FIFO, Optimal, Random, ARC, CAR, WSClock, PFF, OPT+, NRU", *algo)
+	algType, ok := algorithms.ParseAlgorithmType(*algo)
+	if !ok {
+		log.Fatalf("Invalid algorithm: %s. Valid values: %s",
+			*algo, strings.Join(algorithms.ValidAlgorithmNames, ", "))
 	}
 
 	allowedDomains := strings.Split(*corsDomains, ",")

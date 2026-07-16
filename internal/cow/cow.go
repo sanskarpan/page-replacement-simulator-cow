@@ -46,8 +46,12 @@ func NewCopyOnWrite() *CopyOnWrite {
 	return cow
 }
 
-// SharePage marks a page as shared between processes
+// SharePage marks a page as shared between processes.
+// Returns an error if processIDs is empty to prevent a zero-refcount ghost entry.
 func (cow *CopyOnWrite) SharePage(pageID uint64, frameNumber int32, processIDs []string) error {
+	if len(processIDs) == 0 {
+		return fmt.Errorf("SharePage: no process IDs provided for page %d", pageID)
+	}
 	cow.mu.Lock()
 	defer cow.mu.Unlock()
 

@@ -30,23 +30,24 @@ func NewProcessManager(memoryManager *memory.MemoryManager) *ProcessManager {
 	return pm
 }
 
-// CreateProcess creates a new process
+// CreateProcess creates a new process.
+// The process is registered with the memory manager (page table creation) before
+// it is inserted into pm.processes. This eliminates the window where a concurrent
+// GetProcess or AccessMemory call could observe a process with no page table.
 func (pm *ProcessManager) CreateProcess(name string, priority int32, virtualPages uint64) (*models.Process, error) {
 	pid := fmt.Sprintf("P%d", pm.nextPID.Add(1))
 
 	process := models.NewProcess(pid, name, priority, virtualPages)
 
+	// Register with memory manager FIRST — creates the page table.
+	if err := pm.memoryManager.CreateProcess(process); err != nil {
+		return nil, err
+	}
+
+	// Only make the process visible to concurrent callers once its page table exists.
 	pm.mu.Lock()
 	pm.processes[pid] = process
 	pm.mu.Unlock()
-
-	// Register with memory manager
-	if err := pm.memoryManager.CreateProcess(process); err != nil {
-		pm.mu.Lock()
-		delete(pm.processes, pid)
-		pm.mu.Unlock()
-		return nil, err
-	}
 
 	return process, nil
 }
@@ -77,19 +78,22 @@ func (pm *ProcessManager) TerminateProcess(pid string) error {
 func (pm *ProcessManager) ForkProcess(parentPID string) (*models.Process, error) {
 	pm.mu.RLock()
 	parent, exists := pm.processes[parentPID]
-	pm.mu.RUnlock()
-
 	if !exists {
+		pm.mu.RUnlock()
 		return nil, fmt.Errorf("parent process %s not found", parentPID)
 	}
+	parentName := parent.Name
+	parentPriority := parent.Priority
+	parentVirtualPages := parent.VirtualPages
+	pm.mu.RUnlock()
 
 	// Create child process
 	childPID := fmt.Sprintf("P%d", pm.nextPID.Add(1))
 	child := models.NewProcess(
 		childPID,
-		fmt.Sprintf("%s-fork", parent.Name),
-		parent.Priority,
-		parent.VirtualPages,
+		fmt.Sprintf("%s-fork", parentName),
+		parentPriority,
+		parentVirtualPages,
 	)
 	child.ParentID = parentPID
 
@@ -105,6 +109,8 @@ func (pm *ProcessManager) ForkProcess(parentPID string) (*models.Process, error)
 		pm.mu.Lock()
 		delete(pm.processes, childPID)
 		pm.mu.Unlock()
+		// Remove the dangling child reference from the parent.
+		parent.RemoveChild(childPID)
 		return nil, err
 	}
 
@@ -146,10 +152,8 @@ func (pm *ProcessManager) AccessMemory(pid string, virtualPage uint64, write boo
 		return fmt.Errorf("process %s not found", pid)
 	}
 
-	// Update process state
-	if process.GetState() == models.ProcessReady {
-		process.SetState(models.ProcessRunning)
-	}
+	// Update process state atomically (CAS avoids TOCTOU race).
+	process.State.CompareAndSwap(int32(models.ProcessReady), int32(models.ProcessRunning))
 
 	// Perform memory access through memory manager
 	return pm.memoryManager.AccessMemory(pid, virtualPage, write)
