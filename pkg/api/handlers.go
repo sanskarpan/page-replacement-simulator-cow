@@ -9,7 +9,49 @@ import (
 	"github.com/gorilla/mux"
 	"github.com/page-replacement-cow/internal/algorithms"
 	"github.com/page-replacement-cow/internal/memory"
+	"github.com/page-replacement-cow/pkg/models"
 )
+
+// processJSON is a serialization-safe view of models.Process.
+// Atomic fields in models.Process do not marshal as numbers with encoding/json,
+// so this DTO loads them via their Load() methods before encoding.
+type processJSON struct {
+	ID             string   `json:"id"`
+	Name           string   `json:"name"`
+	Priority       int32    `json:"priority"`
+	State          int32    `json:"state"`
+	VirtualPages   uint64   `json:"virtual_pages"`
+	PageTableSize  uint64   `json:"page_table_size"`
+	WorkingSetSize int32    `json:"working_set_size"`
+	PageFaults     int64    `json:"page_faults"`
+	PageHits       int64    `json:"page_hits"`
+	MemoryAccesses int64    `json:"memory_accesses"`
+	CoWCopies      int64    `json:"cow_copies"`
+	CPUTimeNs      int64    `json:"cpu_time_ns"`
+	ParentID       string   `json:"parent_id"`
+	Children       []string `json:"children"`
+	CreatedAt      int64    `json:"created_at_ns"`
+}
+
+func marshalProcess(p *models.Process) processJSON {
+	return processJSON{
+		ID:             p.ID,
+		Name:           p.Name,
+		Priority:       p.Priority,
+		State:          p.State.Load(),
+		VirtualPages:   p.VirtualPages,
+		PageTableSize:  p.PageTableSize,
+		WorkingSetSize: p.WorkingSetSize,
+		PageFaults:     p.PageFaults.Load(),
+		PageHits:       p.PageHits.Load(),
+		MemoryAccesses: p.MemoryAccesses.Load(),
+		CoWCopies:      p.CoWCopies.Load(),
+		CPUTimeNs:      p.CPUTime.Load(),
+		ParentID:       p.ParentID,
+		Children:       p.GetChildren(),
+		CreatedAt:      p.CreatedAt.UnixNano(),
+	}
+}
 
 // HandleGetStatus returns system status
 func (s *Server) HandleGetStatus(w http.ResponseWriter, r *http.Request) {
@@ -40,7 +82,7 @@ func (s *Server) HandleGetProcess(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, process)
+	writeJSON(w, http.StatusOK, marshalProcess(process))
 }
 
 // HandleCreateProcess creates a new process
@@ -75,13 +117,15 @@ func (s *Server) HandleCreateProcess(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	dto := marshalProcess(process)
+
 	// Broadcast update
 	s.Broadcast(map[string]interface{}{
 		"type":    "process_created",
-		"process": process,
+		"process": dto,
 	})
 
-	writeJSON(w, http.StatusCreated, process)
+	writeJSON(w, http.StatusCreated, dto)
 }
 
 // HandleTerminateProcess terminates a process
@@ -114,14 +158,16 @@ func (s *Server) HandleForkProcess(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	childDTO := marshalProcess(child)
+
 	// Broadcast update
 	s.Broadcast(map[string]interface{}{
 		"type":   "process_forked",
 		"parent": pid,
-		"child":  child,
+		"child":  childDTO,
 	})
 
-	writeJSON(w, http.StatusCreated, child)
+	writeJSON(w, http.StatusCreated, childDTO)
 }
 
 // HandleAccessMemory performs a memory access

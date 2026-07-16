@@ -38,6 +38,9 @@ type Metrics struct {
 	AvgSearchTimeNs  atomic.Int64
 	LastEvictionTimeNs atomic.Int64
 
+	// Observability
+	DroppedEvents atomic.Int64 // events dropped because the internal channel was full
+
 	// Process statistics
 	TotalProcesses   atomic.Int32
 	ActiveProcesses  atomic.Int32
@@ -72,6 +75,7 @@ func NewMetrics(totalFrames int32) *Metrics {
 	m.LastEvictionTimeNs.Store(0)
 	m.TotalProcesses.Store(0)
 	m.ActiveProcesses.Store(0)
+	m.DroppedEvents.Store(0)
 	return m
 }
 
@@ -191,6 +195,7 @@ func (m *Metrics) GetSnapshotWithStats(usedFrames, freeFrames, pinnedFrames, pag
 		PageFaultRate:      m.GetPageFaultRate(),
 		PageHitRate:        m.GetPageHitRate(),
 		Uptime:             m.GetUptime(),
+		DroppedEvents:      m.DroppedEvents.Load(),
 	}
 }
 
@@ -219,6 +224,7 @@ type MetricsSnapshot struct {
 	PageFaultRate      float64       `json:"page_fault_rate"`
 	PageHitRate        float64       `json:"page_hit_rate"`
 	Uptime             time.Duration `json:"uptime_ns"`
+	DroppedEvents      int64         `json:"dropped_events"`
 }
 
 // Reset resets all metrics
@@ -243,5 +249,6 @@ func (m *Metrics) Reset() {
 	m.DirtyEvictions.Store(0)
 	m.AvgSearchTimeNs.Store(0)
 	m.LastEvictionTimeNs.Store(0)
+	m.DroppedEvents.Store(0)
 	m.StartTime = time.Now()
 }

@@ -129,9 +129,9 @@ func runSingle(algo, scenario string, numFrames int32, tlbSize int, outputFmt st
 
 func runComparison(scenario string, numFrames int32, tlbSize int, outputFmt string) {
 	mm0 := memory.NewMemoryManager(numFrames, int(tlbSize), algorithms.AlgorithmLRU)
+	defer mm0.Close()
 	pm0 := process.NewProcessManager(mm0)
 	seedSim := simulator.NewSimulator(pm0)
-	mm0.Close()
 
 	results, err := seedSim.CompareAlgorithms(scenario, numFrames, int(tlbSize))
 	if err != nil {
@@ -213,9 +213,9 @@ func runFramesSweep(algo, scenario string, frameMin, frameMax int32, tlbSize int
 	}
 
 	mm0 := memory.NewMemoryManager(frameMin, tlbSize, algorithms.AlgorithmLRU)
+	defer mm0.Close()
 	pm0 := process.NewProcessManager(mm0)
 	seedSim := simulator.NewSimulator(pm0)
-	mm0.Close()
 
 	frameCounts := geometricRange(frameMin, frameMax, 12)
 	results, err := seedSim.CompareFrameCounts(scenario, algo, frameCounts, tlbSize)

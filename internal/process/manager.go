@@ -5,6 +5,7 @@ package process
 
 import (
 	"fmt"
+	"log/slog"
 	"sync"
 	"sync/atomic"
 
@@ -99,10 +100,11 @@ func (pm *ProcessManager) ForkProcess(parentPID string) (*models.Process, error)
 
 	pm.mu.Lock()
 	pm.processes[childPID] = child
-
-	// Add child to parent's children list
-	parent.AddChild(childPID)
 	pm.mu.Unlock()
+
+	// AddChild acquires parent.mu; call it outside pm.mu to maintain a
+	// consistent pm.mu → parent.mu lock order (never parent.mu while pm.mu held).
+	parent.AddChild(childPID)
 
 	// Register fork with memory manager (sets up CoW)
 	if err := pm.memoryManager.ForkProcess(parentPID, childPID, child); err != nil {
@@ -171,7 +173,9 @@ func (pm *ProcessManager) Reset() {
 
 	// Terminate all processes
 	for pid := range pm.processes {
-		pm.memoryManager.RemoveProcess(pid)
+		if err := pm.memoryManager.RemoveProcess(pid); err != nil {
+			slog.Warn("Reset: failed to remove process", "pid", pid, "err", err)
+		}
 	}
 
 	pm.processes = make(map[string]*models.Process)

@@ -61,9 +61,10 @@ func (w *WSClock) SelectVictim(frames []*models.Frame) (*models.Frame, error) {
 
 		if age > w.workingSetAge {
 			if frame.IsModified() {
-				// Simulate writeback: clear the dirty flag inline.
-				// In a real OS this initiates async I/O; here we mark the
-				// frame clean so it becomes an eviction candidate next pass.
+				// Simulator-only simplification: clear the dirty bit inline
+				// without performing actual I/O. A real OS kernel would queue
+				// an async writeback here and defer eviction until it completes;
+				// we skip that to keep the simulator self-contained.
 				frame.Modified.Store(false)
 				continue
 			}

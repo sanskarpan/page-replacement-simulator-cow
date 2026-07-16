@@ -11,6 +11,7 @@ import (
 // BenchmarkMemoryAccess benchmarks basic memory access
 func BenchmarkMemoryAccess(b *testing.B) {
 	mm := memory.NewMemoryManager(128, 16, algorithms.AlgorithmLRU)
+	defer mm.Close()
 	pm := process.NewProcessManager(mm)
 
 	proc, _ := pm.CreateProcess("Benchmark", 1, 10000)
@@ -26,6 +27,7 @@ func BenchmarkMemoryAccess(b *testing.B) {
 // BenchmarkLRU benchmarks LRU algorithm
 func BenchmarkLRU(b *testing.B) {
 	mm := memory.NewMemoryManager(128, 16, algorithms.AlgorithmLRU)
+	defer mm.Close()
 	pm := process.NewProcessManager(mm)
 
 	proc, _ := pm.CreateProcess("Benchmark", 1, 10000)
@@ -41,6 +43,7 @@ func BenchmarkLRU(b *testing.B) {
 // BenchmarkCLOCK benchmarks CLOCK algorithm
 func BenchmarkCLOCK(b *testing.B) {
 	mm := memory.NewMemoryManager(128, 16, algorithms.AlgorithmCLOCK)
+	defer mm.Close()
 	pm := process.NewProcessManager(mm)
 
 	proc, _ := pm.CreateProcess("Benchmark", 1, 10000)
@@ -56,6 +59,7 @@ func BenchmarkCLOCK(b *testing.B) {
 // BenchmarkLFU benchmarks LFU algorithm
 func BenchmarkLFU(b *testing.B) {
 	mm := memory.NewMemoryManager(128, 16, algorithms.AlgorithmLFU)
+	defer mm.Close()
 	pm := process.NewProcessManager(mm)
 
 	proc, _ := pm.CreateProcess("Benchmark", 1, 10000)
@@ -71,6 +75,7 @@ func BenchmarkLFU(b *testing.B) {
 // BenchmarkFIFO benchmarks FIFO algorithm
 func BenchmarkFIFO(b *testing.B) {
 	mm := memory.NewMemoryManager(128, 16, algorithms.AlgorithmFIFO)
+	defer mm.Close()
 	pm := process.NewProcessManager(mm)
 
 	proc, _ := pm.CreateProcess("Benchmark", 1, 10000)
@@ -86,6 +91,7 @@ func BenchmarkFIFO(b *testing.B) {
 // BenchmarkTLBLookup benchmarks TLB lookup
 func BenchmarkTLBLookup(b *testing.B) {
 	mm := memory.NewMemoryManager(128, 64, algorithms.AlgorithmLRU)
+	defer mm.Close()
 	pm := process.NewProcessManager(mm)
 
 	proc, _ := pm.CreateProcess("Benchmark", 1, 10000)
@@ -106,6 +112,7 @@ func BenchmarkTLBLookup(b *testing.B) {
 // BenchmarkCopyOnWrite benchmarks CoW operations
 func BenchmarkCopyOnWrite(b *testing.B) {
 	mm := memory.NewMemoryManager(256, 16, algorithms.AlgorithmLRU)
+	defer mm.Close()
 	pm := process.NewProcessManager(mm)
 
 	// Create parent and load pages
@@ -118,7 +125,10 @@ func BenchmarkCopyOnWrite(b *testing.B) {
 
 	for i := 0; i < b.N; i++ {
 		// Fork child
-		child, _ := pm.ForkProcess(parent.ID)
+		child, err := pm.ForkProcess(parent.ID)
+		if err != nil {
+			b.Fatalf("fork failed: %v", err)
+		}
 
 		// Write to trigger CoW
 		for j := uint64(0); j < 10; j++ {

@@ -9,24 +9,28 @@ import (
 // Frame represents a physical memory frame
 type Frame struct {
 	ID          int32  // Frame number
-	PageID      uint64 // Currently mapped page ID (0 if free)
+	// PageID holds the currently mapped virtual page. PageID=0 is the sentinel
+	// value for a free frame; always call IsFree() before treating PageID as
+	// a valid page reference.
+	PageID      uint64
 	ProcessID   string // Process owning this frame
 	numaNodeID  atomic.Int32 // NUMA node this frame belongs to (atomic to prevent data races)
 
-	// State
-	Free     atomic.Bool
-	Pinned   atomic.Bool // Pinned frames cannot be evicted
-	Modified atomic.Bool // Dirty bit
+	// State — json:"-" prevents encoding the raw atomic struct bytes (use
+	// accessor methods when serializing frame state).
+	Free     atomic.Bool  `json:"-"`
+	Pinned   atomic.Bool  `json:"-"` // Pinned frames cannot be evicted
+	Modified atomic.Bool  `json:"-"` // Dirty bit
 
 	// Tracking
-	LoadedAt    atomic.Int64 // Unix nano when page was loaded
-	LastAccess  atomic.Int64 // Unix nano of last access
-	AccessCount atomic.Int64 // Access counter
+	LoadedAt    atomic.Int64 `json:"-"` // Unix nano when page was loaded
+	LastAccess  atomic.Int64 `json:"-"` // Unix nano of last access
+	AccessCount atomic.Int64 `json:"-"` // Access counter
 
 	mu sync.RWMutex
 
 	// For CLOCK algorithm
-	ReferenceBit atomic.Int32
+	ReferenceBit atomic.Int32 `json:"-"`
 }
 
 // NewFrame creates a new frame

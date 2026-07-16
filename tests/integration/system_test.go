@@ -14,6 +14,7 @@ import (
 // TestBasicMemoryAccess tests basic memory access functionality
 func TestBasicMemoryAccess(t *testing.T) {
 	mm := memory.NewMemoryManager(64, 16, algorithms.AlgorithmLRU)
+	defer mm.Close()
 	pm := process.NewProcessManager(mm)
 
 	// Create a process
@@ -49,6 +50,7 @@ func TestBasicMemoryAccess(t *testing.T) {
 // TestPageReplacement tests page replacement functionality
 func TestPageReplacement(t *testing.T) {
 	mm := memory.NewMemoryManager(16, 8, algorithms.AlgorithmLRU)
+	defer mm.Close()
 	pm := process.NewProcessManager(mm)
 
 	proc, err := pm.CreateProcess("Test", 1, 100)
@@ -84,6 +86,7 @@ func TestPageReplacement(t *testing.T) {
 // TestCopyOnWrite tests copy-on-write functionality
 func TestCopyOnWrite(t *testing.T) {
 	mm := memory.NewMemoryManager(64, 16, algorithms.AlgorithmLRU)
+	defer mm.Close()
 	pm := process.NewProcessManager(mm)
 
 	// Create parent process
@@ -137,6 +140,7 @@ func TestCopyOnWrite(t *testing.T) {
 // TestMultipleProcesses tests multiple processes
 func TestMultipleProcesses(t *testing.T) {
 	mm := memory.NewMemoryManager(128, 16, algorithms.AlgorithmLRU)
+	defer mm.Close()
 	pm := process.NewProcessManager(mm)
 
 	// Create multiple processes
@@ -175,6 +179,7 @@ func TestMultipleProcesses(t *testing.T) {
 // TestSimulationScenarios tests all simulation scenarios
 func TestSimulationScenarios(t *testing.T) {
 	mm := memory.NewMemoryManager(64, 16, algorithms.AlgorithmLRU)
+	defer mm.Close()
 	pm := process.NewProcessManager(mm)
 	sim := simulator.NewSimulator(pm)
 
@@ -222,6 +227,7 @@ func TestAlgorithmComparison(t *testing.T) {
 	for _, alg := range algorithms {
 		t.Run(alg.name, func(t *testing.T) {
 			mm := memory.NewMemoryManager(32, 16, alg.algo)
+			defer mm.Close()
 			pm := process.NewProcessManager(mm)
 			sim := simulator.NewSimulator(pm)
 
@@ -244,6 +250,7 @@ func TestAlgorithmComparison(t *testing.T) {
 // TestTLB tests TLB functionality
 func TestTLB(t *testing.T) {
 	mm := memory.NewMemoryManager(64, 8, algorithms.AlgorithmLRU)
+	defer mm.Close()
 	pm := process.NewProcessManager(mm)
 
 	proc, err := pm.CreateProcess("Test", 1, 100)
@@ -276,6 +283,7 @@ func TestTLB(t *testing.T) {
 // TestStressMultipleConcurrentAccesses tests concurrent memory accesses
 func TestStressMultipleConcurrentAccesses(t *testing.T) {
 	mm := memory.NewMemoryManager(128, 16, algorithms.AlgorithmLRU)
+	defer mm.Close()
 	pm := process.NewProcessManager(mm)
 
 	proc, err := pm.CreateProcess("Stress", 1, 1000)
@@ -314,6 +322,7 @@ func TestStressMultipleConcurrentAccesses(t *testing.T) {
 // TestRandomAlgorithm tests the Random algorithm in integration
 func TestRandomAlgorithm(t *testing.T) {
 	mm := memory.NewMemoryManager(32, 16, algorithms.AlgorithmRandom)
+	defer mm.Close()
 	pm := process.NewProcessManager(mm)
 
 	proc, err := pm.CreateProcess("Test", 1, 100)
@@ -340,6 +349,7 @@ func TestRandomAlgorithm(t *testing.T) {
 // TestCoWForkChain tests parent -> child -> grandchild fork chain
 func TestCoWForkChain(t *testing.T) {
 	mm := memory.NewMemoryManager(64, 16, algorithms.AlgorithmLRU)
+	defer mm.Close()
 	pm := process.NewProcessManager(mm)
 
 	parent, err := pm.CreateProcess("Parent", 1, 100)
@@ -382,6 +392,7 @@ func TestCoWForkChain(t *testing.T) {
 // TestTLBKeyCorrectness verifies TLB key format fix
 func TestTLBKeyCorrectness(t *testing.T) {
 	mm := memory.NewMemoryManager(64, 16, algorithms.AlgorithmLRU)
+	defer mm.Close()
 	pm := process.NewProcessManager(mm)
 
 	proc, err := pm.CreateProcess("Test", 1, 1000)
@@ -416,6 +427,7 @@ func TestTLBKeyCorrectness(t *testing.T) {
 // TestCoWCopyCountAccuracy verifies CoW copy count is not double-counted
 func TestCoWCopyCountAccuracy(t *testing.T) {
 	mm := memory.NewMemoryManager(64, 16, algorithms.AlgorithmLRU)
+	defer mm.Close()
 	pm := process.NewProcessManager(mm)
 
 	parent, err := pm.CreateProcess("Parent", 1, 100)
@@ -457,6 +469,7 @@ func TestCoWCopyCountAccuracy(t *testing.T) {
 // TestConcurrentForkAndAccess tests concurrent fork and memory access
 func TestConcurrentForkAndAccess(t *testing.T) {
 	mm := memory.NewMemoryManager(128, 16, algorithms.AlgorithmLRU)
+	defer mm.Close()
 	pm := process.NewProcessManager(mm)
 
 	parent, err := pm.CreateProcess("Parent", 1, 1000)
@@ -475,7 +488,7 @@ func TestConcurrentForkAndAccess(t *testing.T) {
 	go func() {
 		child, err := pm.ForkProcess(parent.ID)
 		if err != nil {
-			t.Logf("Fork failed: %v", err)
+			t.Errorf("Fork 1 failed: %v", err)
 		}
 		if child != nil {
 			for i := uint64(0); i < 10; i++ {
@@ -495,7 +508,7 @@ func TestConcurrentForkAndAccess(t *testing.T) {
 	go func() {
 		child2, err := pm.ForkProcess(parent.ID)
 		if err != nil {
-			t.Logf("Fork 2 failed: %v", err)
+			t.Errorf("Fork 2 failed: %v", err)
 		}
 		if child2 != nil {
 			for i := uint64(0); i < 10; i++ {
@@ -518,6 +531,16 @@ func TestConcurrentForkAndAccess(t *testing.T) {
 
 	metrics := mm.GetMetrics()
 
+	if metrics.TotalAccesses == 0 {
+		t.Error("Expected non-zero total accesses after concurrent access")
+	}
+	if metrics.PageFaults == 0 {
+		t.Error("Expected non-zero page faults after concurrent access")
+	}
+	if metrics.TotalProcesses < 1 {
+		t.Errorf("Expected at least 1 process registered, got %d", metrics.TotalProcesses)
+	}
+
 	t.Logf("Concurrent fork+access test passed")
 	t.Logf("  Total Accesses: %d", metrics.TotalAccesses)
 	t.Logf("  CoW Copies: %d", metrics.CoWCopies)
@@ -526,6 +549,7 @@ func TestConcurrentForkAndAccess(t *testing.T) {
 
 func TestARCAlgorithmIntegration(t *testing.T) {
 	mm := memory.NewMemoryManager(32, 16, algorithms.AlgorithmARC)
+	defer mm.Close()
 	pm := process.NewProcessManager(mm)
 
 	proc, err := pm.CreateProcess("ARC-Test", 1, 200)
@@ -559,6 +583,7 @@ func TestARCAlgorithmIntegration(t *testing.T) {
 
 func TestCARAlgorithmIntegration(t *testing.T) {
 	mm := memory.NewMemoryManager(32, 16, algorithms.AlgorithmCAR)
+	defer mm.Close()
 	pm := process.NewProcessManager(mm)
 
 	proc, err := pm.CreateProcess("CAR-Test", 1, 200)
@@ -589,6 +614,7 @@ func TestCARAlgorithmIntegration(t *testing.T) {
 
 func TestWSClockIntegration(t *testing.T) {
 	mm := memory.NewMemoryManager(32, 16, algorithms.AlgorithmWSClock)
+	defer mm.Close()
 	pm := process.NewProcessManager(mm)
 
 	proc, err := pm.CreateProcess("WSClock-Test", 1, 200)
@@ -619,6 +645,7 @@ func TestWSClockIntegration(t *testing.T) {
 
 func TestPFFResidentSet(t *testing.T) {
 	mm := memory.NewMemoryManager(64, 16, algorithms.AlgorithmPFF)
+	defer mm.Close()
 	pm := process.NewProcessManager(mm)
 
 	proc, err := pm.CreateProcess("PFF-Test", 1, 500)
@@ -644,6 +671,7 @@ func TestPFFResidentSet(t *testing.T) {
 
 func TestOPTPlusIntegration(t *testing.T) {
 	mm := memory.NewMemoryManager(32, 16, algorithms.AlgorithmOPTPlus)
+	defer mm.Close()
 	pm := process.NewProcessManager(mm)
 
 	proc, err := pm.CreateProcess("OPT+-Test", 1, 200)
@@ -705,7 +733,7 @@ func TestPageClustering(t *testing.T) {
 		t.Error("Expected sequential cluster")
 	}
 
-	prefetch := pcm.GetPrefetchPages(10)
+	prefetch := pcm.GetPrefetchPages("test", 10)
 	if len(prefetch) != 16 {
 		t.Errorf("Expected 16 prefetch pages, got %d", len(prefetch))
 	}

@@ -230,6 +230,9 @@ async function loadScenarios() {
         container.querySelectorAll('.scenario-btn').forEach(btn => {
             btn.addEventListener('click', async () => {
                 const scenario = btn.dataset.scenario;
+                // Capture desc text before textContent wipes child nodes.
+                const descEl = btn.querySelector('.scenario-desc');
+                const desc = descEl ? descEl.textContent : '';
                 btn.disabled = true;
                 btn.textContent = 'Running...';
 
@@ -242,7 +245,7 @@ async function loadScenarios() {
                         btn.disabled = false;
                         btn.innerHTML = `
                             <span class="scenario-name">${escapeHtml(scenario)}</span>
-                            <span class="scenario-desc">${escapeHtml(btn.querySelector('.scenario-desc').textContent)}</span>
+                            <span class="scenario-desc">${escapeHtml(desc)}</span>
                         `;
                     }, 1000);
                 }

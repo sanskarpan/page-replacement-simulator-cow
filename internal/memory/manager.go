@@ -337,7 +337,7 @@ func (mm *MemoryManager) tryPrefetch(processID string) {
 	}
 	// anchor = first page of the last 3-page sequential window detected by DetectSequential
 	anchor := pages[len(pages)-3]
-	prefetchPages := mm.clusterManager.GetPrefetchPages(anchor)
+	prefetchPages := mm.clusterManager.GetPrefetchPages(processID, anchor)
 	if len(prefetchPages) == 0 {
 		return
 	}
@@ -379,6 +379,9 @@ func (mm *MemoryManager) handlePageFault(processID string, page *models.Page, wr
 			frame, err := mm.allocateFrameForPage(page.ID, processID)
 			if err != nil {
 				if evErr := mm.atomicEvictAndAlloc(page, processID); evErr != nil {
+					// Restore compressed entry to prevent data loss when frame
+					// allocation fails after DecompressPage deleted it.
+					mm.compressionManager.RestoreCompressed(cp)
 					return fmt.Errorf("handlePageFault (compressed): %w", evErr)
 				}
 			} else {
@@ -700,7 +703,7 @@ func (mm *MemoryManager) emitEvent(event string, data map[string]interface{}) {
 	select {
 	case mm.eventCh <- eventMsg{event: event, data: data}:
 	default:
-		// Channel full: drop rather than blocking the caller (BUG-09 fix).
+		mm.metrics.DroppedEvents.Add(1)
 	}
 }
 
@@ -879,12 +882,23 @@ func (mm *MemoryManager) updateWorkingSet(processID string, virtualPage uint64) 
 	}
 	mm.workingSetAccesses[processID] = ws
 
-	seen := make(map[uint64]struct{}, window)
-	for _, p := range ws {
-		seen[p] = struct{}{}
+	// O(n²) uniqueness count avoids a heap allocation per access for the small
+	// working-set windows typical in this simulator (window ≤ 64 by default).
+	unique := 0
+	for i, p := range ws {
+		dup := false
+		for j := 0; j < i; j++ {
+			if ws[j] == p {
+				dup = true
+				break
+			}
+		}
+		if !dup {
+			unique++
+		}
 	}
 	if proc := mm.processes[processID]; proc != nil {
-		proc.UpdateWorkingSetSize(int32(len(seen)))
+		proc.UpdateWorkingSetSize(int32(unique))
 	}
 }
 
@@ -919,6 +933,13 @@ func (mm *MemoryManager) enforcePFFResident(target int32) {
 		if err := mm.evictPage(victim); err != nil {
 			break
 		}
-		usedFrames = mm.frameTable.GetUsedFrames()
+		// Remove the evicted frame from the local slice to avoid an
+		// extra GetUsedFrames() allocation on each loop iteration.
+		for i, f := range usedFrames {
+			if f.ID == victim.ID {
+				usedFrames = append(usedFrames[:i], usedFrames[i+1:]...)
+				break
+			}
+		}
 	}
 }

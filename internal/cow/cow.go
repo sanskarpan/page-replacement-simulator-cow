@@ -123,15 +123,19 @@ func (cow *CopyOnWrite) HandleWrite(pageID uint64, processID string, page *model
 		return false, 0, nil
 	}
 
-	// Multiple references: decrement atomically while holding the lock so no
-	// concurrent writer also sees refCount>1 for this process entry.
-	if sharedPage.Processes[processID] {
-		delete(sharedPage.Processes, processID)
-		sharedPage.RefCount.Add(-1)
-		cow.refCounter.Decrement(pageID)
-		if sharedPage.RefCount.Load() <= 0 {
-			delete(cow.sharedPages, pageID)
-		}
+	// Multiple references: the write triggers CoW only if this process is a
+	// registered sharer. An unregistered processID (e.g. stale reference) must
+	// not spuriously trigger a copy.
+	if !sharedPage.Processes[processID] {
+		cow.mu.Unlock()
+		cow.copiesAvoided.Add(1)
+		return false, 0, nil
+	}
+	delete(sharedPage.Processes, processID)
+	sharedPage.RefCount.Add(-1)
+	cow.refCounter.Decrement(pageID)
+	if sharedPage.RefCount.Load() <= 0 {
+		delete(cow.sharedPages, pageID)
 	}
 	cow.mu.Unlock()
 
@@ -158,30 +162,6 @@ func (cow *CopyOnWrite) decrementRefCount(pageID uint64, processID string) {
 		cow.refCounter.Decrement(pageID)
 
 		// If no more references, remove from shared pages
-		if sharedPage.RefCount.Load() <= 0 {
-			delete(cow.sharedPages, pageID)
-		}
-	}
-}
-
-// unsharePageInternal removes a page from shared tracking
-func (cow *CopyOnWrite) unsharePageInternal(pageID uint64, processID string) {
-	cow.mu.Lock()
-	defer cow.mu.Unlock()
-
-	sharedPage, exists := cow.sharedPages[pageID]
-	if !exists {
-		return
-	}
-
-	sharedPage.mu.Lock()
-	defer sharedPage.mu.Unlock()
-
-	if sharedPage.Processes[processID] {
-		delete(sharedPage.Processes, processID)
-		sharedPage.RefCount.Add(-1)
-		cow.refCounter.Decrement(pageID)
-
 		if sharedPage.RefCount.Load() <= 0 {
 			delete(cow.sharedPages, pageID)
 		}

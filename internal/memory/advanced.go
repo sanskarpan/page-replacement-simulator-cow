@@ -2,6 +2,7 @@ package memory
 
 import (
 	"fmt"
+	"strconv"
 	"sync"
 	"time"
 
@@ -30,7 +31,8 @@ func (nm *NumaManager) GetNode(nodeID int32) (*models.NumaNode, error) {
 	defer nm.mu.RUnlock()
 	for _, n := range nm.nodes {
 		if n.ID == nodeID {
-			return n, nil
+			nodeCopy := *n
+			return &nodeCopy, nil
 		}
 	}
 	return nil, fmt.Errorf("NUMA node %d not found", nodeID)
@@ -83,6 +85,10 @@ func (nm *NumaManager) estimateAccessCost(from, to *models.NumaNode) int64 {
 	return to.AccessCostNs * 2
 }
 
+// AllocateFrameOnNode allocates a simulated frame on a specific NUMA node by
+// decrementing the node's LocalFrames counter. The returned frame is NOT
+// registered in any FrameTable; callers that need FrameTable tracking should
+// use MemoryManager.allocateFrameForPage instead.
 func (nm *NumaManager) AllocateFrameOnNode(nodeID int32, pageID uint64, processID string) (*models.Frame, error) {
 	nm.mu.Lock()
 	defer nm.mu.Unlock()
@@ -114,7 +120,9 @@ func (nm *NumaManager) GetNodes() []*models.NumaNode {
 }
 
 type PageClusterManager struct {
-	clusters        map[uint64]*models.PageCluster
+	// Key: processID + "\x00" + anchorPage — prevents cross-process collisions
+	// when different processes happen to share the same anchor virtual page number.
+	clusters        map[string]*models.PageCluster
 	minClusterSize  int
 	maxClusterSize  int
 	sequentialBoost int
@@ -123,11 +131,15 @@ type PageClusterManager struct {
 
 func NewPageClusterManager(minSize, maxSize int) *PageClusterManager {
 	return &PageClusterManager{
-		clusters:        make(map[uint64]*models.PageCluster),
+		clusters:        make(map[string]*models.PageCluster),
 		minClusterSize:  minSize,
 		maxClusterSize:  maxSize,
 		sequentialBoost: 8,
 	}
+}
+
+func clusterKey(processID string, anchorPage uint64) string {
+	return processID + "\x00" + strconv.FormatUint(anchorPage, 10)
 }
 
 func (pcm *PageClusterManager) DetectSequential(processID string, pages []uint64) *models.PageCluster {
@@ -151,16 +163,16 @@ func (pcm *PageClusterManager) DetectSequential(processID string, pages []uint64
 		Pages:       make([]*models.Page, 0, pcm.maxClusterSize),
 		ProcessID:   processID,
 	}
-	pcm.clusters[pages[0]] = cluster
+	pcm.clusters[clusterKey(processID, pages[0])] = cluster
 
 	return cluster
 }
 
-func (pcm *PageClusterManager) GetPrefetchPages(anchorPage uint64) []uint64 {
+func (pcm *PageClusterManager) GetPrefetchPages(processID string, anchorPage uint64) []uint64 {
 	pcm.mu.RLock()
 	defer pcm.mu.RUnlock()
 
-	cluster, exists := pcm.clusters[anchorPage]
+	cluster, exists := pcm.clusters[clusterKey(processID, anchorPage)]
 	if !exists || !cluster.Sequential {
 		return nil
 	}
@@ -176,12 +188,12 @@ func (pcm *PageClusterManager) ClearClusters(processID string) {
 	pcm.mu.Lock()
 	defer pcm.mu.Unlock()
 	if processID == "" {
-		pcm.clusters = make(map[uint64]*models.PageCluster)
+		pcm.clusters = make(map[string]*models.PageCluster)
 		return
 	}
-	for anchor, cluster := range pcm.clusters {
+	for key, cluster := range pcm.clusters {
 		if cluster.ProcessID == processID {
-			delete(pcm.clusters, anchor)
+			delete(pcm.clusters, key)
 		}
 	}
 }
@@ -241,6 +253,13 @@ func (cm *CompressionManager) CompressPage(pageID uint64, data []byte) *Compress
 	}
 
 	cm.mu.Lock()
+	// Guard against duplicate insertion: ShouldCompress + CompressPage is a
+	// TOCTOU pair — another caller could have compressed the same page between
+	// our ShouldCompress check and this lock acquisition.
+	if _, exists := cm.compressedPages[pageID]; exists {
+		cm.mu.Unlock()
+		return nil
+	}
 	cm.compressedPages[pageID] = cp
 	cm.totalOriginal += cp.OriginalSize
 	cm.totalCompressed += cp.CompressedSize
@@ -251,6 +270,26 @@ func (cm *CompressionManager) CompressPage(pageID uint64, data []byte) *Compress
 	cm.mu.Unlock()
 
 	return cp
+}
+
+// RestoreCompressed re-inserts a previously decompressed page back into the
+// compression store. Used by handlePageFault when frame allocation fails after
+// DecompressPage has already deleted the compressed entry, preventing silent
+// data loss.
+func (cm *CompressionManager) RestoreCompressed(cp *CompressedPage) {
+	cm.mu.Lock()
+	defer cm.mu.Unlock()
+	if _, exists := cm.compressedPages[cp.PageID]; exists {
+		return // already restored or re-compressed concurrently
+	}
+	cm.compressedPages[cp.PageID] = cp
+	cm.totalOriginal += cp.OriginalSize
+	cm.totalCompressed += cp.CompressedSize
+	cm.pagesCompressed++
+	cm.pagesDecompressed--
+	if cm.totalOriginal > 0 {
+		cm.compressionRatio = float64(cm.totalCompressed) / float64(cm.totalOriginal)
+	}
 }
 
 func (cm *CompressionManager) DecompressPage(pageID uint64) *CompressedPage {

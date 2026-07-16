@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"math/rand"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/page-replacement-cow/pkg/models"
@@ -21,8 +20,8 @@ import (
 //	Class 3  R=1, M=1  — worst candidate for eviction
 type NRU struct {
 	name        string
-	mu          sync.Mutex // protects rng; also serialises the Load→Store in SelectVictim
-	accessCount atomic.Int64
+	mu          sync.Mutex // protects rng and accessCount; prevents TOCTOU on clearPeriod check-and-store
+	accessCount int64      // always accessed under mu
 	clearPeriod int64
 	rng         *rand.Rand
 }
@@ -40,8 +39,8 @@ func (n *NRU) SelectVictim(frames []*models.Frame) (*models.Frame, error) {
 	defer n.mu.Unlock()
 
 	// Periodic clock tick: clear all R bits to give cold pages a second chance.
-	if n.accessCount.Load() >= n.clearPeriod {
-		n.accessCount.Store(0)
+	if n.accessCount >= n.clearPeriod {
+		n.accessCount = 0
 		for _, f := range frames {
 			if !f.IsFree() {
 				f.ClearReferenceBit()
@@ -74,13 +73,17 @@ func (n *NRU) SelectVictim(frames []*models.Frame) (*models.Frame, error) {
 
 func (n *NRU) OnPageAccess(frame *models.Frame, write bool) {
 	frame.Access(write)
-	n.accessCount.Add(1)
+	n.mu.Lock()
+	n.accessCount++
+	n.mu.Unlock()
 }
 
 func (n *NRU) OnPageFault(frame *models.Frame) {
 	if frame != nil {
 		frame.Access(false)
-		n.accessCount.Add(1)
+		n.mu.Lock()
+		n.accessCount++
+		n.mu.Unlock()
 	}
 }
 
@@ -92,4 +95,8 @@ func (n *NRU) OnPageEviction(frame *models.Frame) {
 
 func (n *NRU) GetName() string { return n.name }
 
-func (n *NRU) Reset() { n.accessCount.Store(0) }
+func (n *NRU) Reset() {
+	n.mu.Lock()
+	n.accessCount = 0
+	n.mu.Unlock()
+}
