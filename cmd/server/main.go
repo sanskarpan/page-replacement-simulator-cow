@@ -49,6 +49,8 @@ func main() {
 		algType = algorithms.AlgorithmPFF
 	case "OPT+":
 		algType = algorithms.AlgorithmOPTPlus
+	case "NRU":
+		algType = algorithms.AlgorithmNRU
 	default:
 		log.Fatalf("Invalid algorithm: %s", *algo)
 	}

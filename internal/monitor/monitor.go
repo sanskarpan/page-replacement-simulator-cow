@@ -26,6 +26,13 @@ type Monitor struct {
 	eventSubs    map[int]chan Event
 	nextSubID    int
 	eventSubsMu  sync.Mutex
+
+	// Thrashing detection
+	thrashThreshold float64      // fault rate above which thrashing is declared (0–1)
+	thrashWindow    int          // number of snapshots in the detection window
+	isThrashing     bool
+	thrashedAt      time.Time
+	thrashMu        sync.RWMutex
 }
 
 // HistoricalSnapshot represents a point-in-time snapshot
@@ -44,14 +51,16 @@ type Event struct {
 // NewMonitor creates a new monitor
 func NewMonitor(pm *process.ProcessManager, mm *memory.MemoryManager) *Monitor {
 	mon := &Monitor{
-		processManager: pm,
-		memoryManager:  mm,
-		history:        make([]HistoricalSnapshot, 0),
-		maxHistory:     1000,
-		events:         make([]Event, 0),
-		maxEvents:      500,
-		eventSubs:      make(map[int]chan Event),
-		nextSubID:      1,
+		processManager:  pm,
+		memoryManager:   mm,
+		history:         make([]HistoricalSnapshot, 0),
+		maxHistory:      1000,
+		events:          make([]Event, 0),
+		maxEvents:       500,
+		eventSubs:       make(map[int]chan Event),
+		nextSubID:       1,
+		thrashThreshold: 0.8,
+		thrashWindow:    5,
 	}
 
 	// Set up event callback
@@ -101,6 +110,105 @@ func (mon *Monitor) CaptureSnapshot() {
 		mon.history = mon.history[1:]
 	}
 	mon.historyMu.Unlock()
+
+	mon.detectThrashing()
+}
+
+// detectThrashing computes the incremental fault rate over the last thrashWindow
+// snapshots and fires a "thrashing_detected" event on the rising edge.
+func (mon *Monitor) detectThrashing() {
+	mon.historyMu.RLock()
+	n := len(mon.history)
+	if n < 2 {
+		mon.historyMu.RUnlock()
+		return
+	}
+	wStart := n - mon.thrashWindow
+	if wStart < 0 {
+		wStart = 0
+	}
+	oldFaults := mon.history[wStart].Metrics.PageFaults
+	newFaults := mon.history[n-1].Metrics.PageFaults
+	oldAccesses := mon.history[wStart].Metrics.TotalAccesses
+	newAccesses := mon.history[n-1].Metrics.TotalAccesses
+	mon.historyMu.RUnlock()
+
+	deltaAccesses := newAccesses - oldAccesses
+	if deltaAccesses == 0 {
+		return
+	}
+	windowFaultRate := float64(newFaults-oldFaults) / float64(deltaAccesses)
+
+	mon.thrashMu.Lock()
+	wasThrshing := mon.isThrashing
+	if windowFaultRate >= mon.thrashThreshold {
+		if !mon.isThrashing {
+			mon.isThrashing = true
+			mon.thrashedAt = time.Now()
+		}
+	} else {
+		mon.isThrashing = false
+	}
+	thrashing := mon.isThrashing
+	mon.thrashMu.Unlock()
+
+	// Emit only on the rising edge (false → true transition).
+	if thrashing && !wasThrshing {
+		mon.handleEvent("thrashing_detected", map[string]interface{}{
+			"window_fault_rate": windowFaultRate,
+			"threshold":         mon.thrashThreshold,
+			"window_snapshots":  mon.thrashWindow,
+		})
+	}
+}
+
+// ThrashingInfo contains a point-in-time view of the thrashing detector state.
+type ThrashingInfo struct {
+	IsThrashing     bool      `json:"is_thrashing"`
+	WindowFaultRate float64   `json:"window_fault_rate"`
+	Threshold       float64   `json:"threshold"`
+	WindowSize      int       `json:"window_size"`
+	DetectedAt      time.Time `json:"detected_at,omitempty"`
+}
+
+// GetThrashingInfo returns current thrashing detector state.
+func (mon *Monitor) GetThrashingInfo() ThrashingInfo {
+	mon.thrashMu.RLock()
+	thrashing := mon.isThrashing
+	detectedAt := mon.thrashedAt
+	mon.thrashMu.RUnlock()
+
+	// Compute current window fault rate for the response.
+	mon.historyMu.RLock()
+	n := len(mon.history)
+	var windowFaultRate float64
+	if n >= 2 {
+		wStart := n - mon.thrashWindow
+		if wStart < 0 {
+			wStart = 0
+		}
+		deltaA := mon.history[n-1].Metrics.TotalAccesses - mon.history[wStart].Metrics.TotalAccesses
+		if deltaA > 0 {
+			deltaF := mon.history[n-1].Metrics.PageFaults - mon.history[wStart].Metrics.PageFaults
+			windowFaultRate = float64(deltaF) / float64(deltaA)
+		}
+	}
+	mon.historyMu.RUnlock()
+
+	return ThrashingInfo{
+		IsThrashing:     thrashing,
+		WindowFaultRate: windowFaultRate,
+		Threshold:       mon.thrashThreshold,
+		WindowSize:      mon.thrashWindow,
+		DetectedAt:      detectedAt,
+	}
+}
+
+// IsThrashing returns whether thrashing is currently detected.
+func (mon *Monitor) IsThrashing() bool {
+	mon.thrashMu.RLock()
+	defer mon.thrashMu.RUnlock()
+	return mon.isThrashing
 }
 
 // GetHistory returns historical snapshots
