@@ -230,6 +230,8 @@ func (s *Server) HandleSetAlgorithm(w http.ResponseWriter, r *http.Request) {
 		algType = algorithms.AlgorithmPFF
 	case "OPT+":
 		algType = algorithms.AlgorithmOPTPlus
+	case "NRU":
+		algType = algorithms.AlgorithmNRU
 	default:
 		writeError(w, http.StatusBadRequest, "invalid algorithm")
 		return
@@ -363,6 +365,60 @@ func (s *Server) HandleEnableFeature(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// HandleMapHugePage allocates a 2MB huge-page mapping for a process.
+// POST /api/processes/{id}/hugepage   Body: {"huge_page": N}
+func (s *Server) HandleMapHugePage(w http.ResponseWriter, r *http.Request) {
+	pid := mux.Vars(r)["id"]
+
+	var req struct {
+		HugePage uint64 `json:"huge_page"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	frameID, err := s.memoryManager.MapHugePage(pid, req.HugePage)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, map[string]interface{}{
+		"process_id":      pid,
+		"huge_page_index": req.HugePage,
+		"frame_id":        frameID,
+		"virtual_addr":    req.HugePage << 21,
+		"size":            "2MB",
+	})
+}
+
+// HandleGetHugePages returns all huge-page mappings for a process.
+// GET /api/processes/{id}/hugepages
+func (s *Server) HandleGetHugePages(w http.ResponseWriter, r *http.Request) {
+	pid := mux.Vars(r)["id"]
+
+	pages, err := s.memoryManager.GetHugePages(pid)
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, pages)
+}
+
+// HandleGetWorkingSet returns the current working-set size for a process.
+// GET /api/processes/{id}/workingset
+func (s *Server) HandleGetWorkingSet(w http.ResponseWriter, r *http.Request) {
+	pid := mux.Vars(r)["id"]
+
+	info, err := s.memoryManager.GetWorkingSetInfo(pid)
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, info)
+}
+
 // HandleGetMultiLevelPageTable returns a multi-level page table for a process
 func (s *Server) HandleGetMultiLevelPageTable(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
@@ -386,6 +442,101 @@ func (s *Server) HandleGetMultiLevelPageTable(w http.ResponseWriter, r *http.Req
 	})
 
 	writeJSON(w, http.StatusOK, entries)
+}
+
+// HandleCompareAlgorithms runs all algorithms on the same scenario and returns
+// a ranked list sorted by ascending fault rate.
+// POST /api/simulation/compare
+// Body: {"scenario":"locality","frames":32,"tlb":16}
+func (s *Server) HandleCompareAlgorithms(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Scenario string `json:"scenario"`
+		Frames   int32  `json:"frames"`
+		TLB      int    `json:"tlb"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if req.Frames <= 0 {
+		req.Frames = 32
+	}
+	if req.TLB <= 0 {
+		req.TLB = 16
+	}
+	if req.Scenario == "" {
+		req.Scenario = "mixed"
+	}
+
+	results, err := s.simulator.CompareAlgorithms(req.Scenario, req.Frames, req.TLB)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, results)
+}
+
+// HandleFrameCountSweep sweeps frame counts for one algorithm and returns the
+// Belady curve (fault rate vs. frame count).
+// POST /api/simulation/sweep
+// Body: {"scenario":"locality","algorithm":"LRU","frame_min":4,"frame_max":64,"tlb":16}
+func (s *Server) HandleFrameCountSweep(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Scenario  string `json:"scenario"`
+		Algorithm string `json:"algorithm"`
+		FrameMin  int32  `json:"frame_min"`
+		FrameMax  int32  `json:"frame_max"`
+		TLB       int    `json:"tlb"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if req.Algorithm == "" {
+		req.Algorithm = "LRU"
+	}
+	if req.Scenario == "" {
+		req.Scenario = "mixed"
+	}
+	if req.FrameMin < 2 {
+		req.FrameMin = 2
+	}
+	if req.FrameMax <= req.FrameMin {
+		req.FrameMax = req.FrameMin * 8
+	}
+	if req.TLB <= 0 {
+		req.TLB = 16
+	}
+
+	frameCounts := geometricFrameRange(req.FrameMin, req.FrameMax, 10)
+	results, err := s.simulator.CompareFrameCounts(req.Scenario, req.Algorithm, frameCounts, req.TLB)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, results)
+}
+
+// HandleGetThrashingStatus returns current thrashing detector state.
+// GET /api/simulation/thrashing
+func (s *Server) HandleGetThrashingStatus(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, s.monitor.GetThrashingInfo())
+}
+
+// geometricFrameRange generates up to maxPoints frame counts in a geometric
+// progression from min to max (inclusive).
+func geometricFrameRange(min, max int32, maxPoints int) []int32 {
+	result := []int32{min}
+	curr := min
+	for len(result) < maxPoints && curr < max {
+		next := curr * 2
+		if next > max {
+			next = max
+		}
+		result = append(result, next)
+		curr = next
+	}
+	return result
 }
 
 // Helper functions
@@ -421,6 +572,9 @@ func SetupRoutes(s *Server) *mux.Router {
 	api.HandleFunc("/processes/{id}", s.HandleTerminateProcess).Methods("DELETE")
 	api.HandleFunc("/processes/{id}/fork", s.HandleForkProcess).Methods("POST")
 	api.HandleFunc("/processes/{id}/pages", s.HandleGetPageTable).Methods("GET")
+	api.HandleFunc("/processes/{id}/hugepage", s.HandleMapHugePage).Methods("POST")
+	api.HandleFunc("/processes/{id}/hugepages", s.HandleGetHugePages).Methods("GET")
+	api.HandleFunc("/processes/{id}/workingset", s.HandleGetWorkingSet).Methods("GET")
 
 	// Memory
 	api.HandleFunc("/memory/access", s.HandleAccessMemory).Methods("POST")
@@ -434,6 +588,9 @@ func SetupRoutes(s *Server) *mux.Router {
 	// Simulation
 	api.HandleFunc("/simulation/scenarios", s.HandleGetScenarios).Methods("GET")
 	api.HandleFunc("/simulation/run", s.HandleRunSimulation).Methods("POST")
+	api.HandleFunc("/simulation/compare", s.HandleCompareAlgorithms).Methods("POST")
+	api.HandleFunc("/simulation/sweep", s.HandleFrameCountSweep).Methods("POST")
+	api.HandleFunc("/simulation/thrashing", s.HandleGetThrashingStatus).Methods("GET")
 
 	// Advanced features
 	api.HandleFunc("/numa/stats", s.HandleGetNumaStats).Methods("GET")

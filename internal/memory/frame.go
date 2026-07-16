@@ -187,6 +187,22 @@ type FrameTableStats struct {
 	DirtyFrames  int32
 }
 
+// AllocateFrameInRange allocates the first free frame in [start, end) for NUMA-local allocation.
+func (ft *FrameTable) AllocateFrameInRange(start, end int32, pageID uint64, processID string) (*models.Frame, error) {
+	ft.mu.Lock()
+	defer ft.mu.Unlock()
+	if end > ft.TotalSize {
+		end = ft.TotalSize
+	}
+	for i := start; i < end; i++ {
+		if ft.Frames[i].IsFree() {
+			ft.Frames[i].Allocate(pageID, processID)
+			return ft.Frames[i], nil
+		}
+	}
+	return nil, fmt.Errorf("no free frames in NUMA range [%d, %d)", start, end)
+}
+
 // Clear releases all frames
 func (ft *FrameTable) Clear() {
 	ft.mu.Lock()
