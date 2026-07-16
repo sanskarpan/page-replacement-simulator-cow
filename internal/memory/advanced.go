@@ -285,7 +285,10 @@ func (cm *CompressionManager) RestoreCompressed(cp *CompressedPage) {
 	cm.compressedPages[cp.PageID] = cp
 	cm.totalOriginal += cp.OriginalSize
 	cm.totalCompressed += cp.CompressedSize
-	cm.pagesCompressed++
+	// Do NOT increment pagesCompressed — this is not a new compression event;
+	// it undoes a failed decompression. Decrementing pagesDecompressed keeps
+	// "net successful decompressions" correct so callers can compute
+	// currentCompressed = pagesCompressed - pagesDecompressed.
 	cm.pagesDecompressed--
 	if cm.totalOriginal > 0 {
 		cm.compressionRatio = float64(cm.totalCompressed) / float64(cm.totalOriginal)
