@@ -27,6 +27,7 @@ const (
 	AlgorithmWSClock
 	AlgorithmPFF
 	AlgorithmOPTPlus
+	AlgorithmNRU
 )
 
 func GetAlgorithmName(algType AlgorithmType) string {
@@ -53,6 +54,8 @@ func GetAlgorithmName(algType AlgorithmType) string {
 		return "PFF"
 	case AlgorithmOPTPlus:
 		return "OPT+"
+	case AlgorithmNRU:
+		return "NRU"
 	default:
 		return "Unknown"
 	}
