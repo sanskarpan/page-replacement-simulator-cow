@@ -48,15 +48,17 @@ func (nm *NumaManager) GetClosestNode(targetID int32) (*models.NumaNode, int64) 
 		return nm.nodes[0], 0
 	}
 
+	// Start with the target node as the best option using its local access cost
+	// as the baseline. A remote node only wins if it is genuinely cheaper.
 	best := target
-	bestCost := int64(0)
+	bestCost := target.AccessCostNs
 
 	for _, n := range nm.nodes {
 		if n.ID == targetID {
 			continue
 		}
 		cost := nm.estimateAccessCost(target, n)
-		if best == target && cost < best.AccessCostNs {
+		if cost < bestCost {
 			best = n
 			bestCost = cost
 		}

@@ -110,9 +110,11 @@ func (cow *CopyOnWrite) HandleWrite(pageID uint64, processID string, page *model
 				delete(cow.sharedPages, pageID)
 			}
 		}
-		cow.mu.Unlock()
+		// Clear flags while still under cow.mu to prevent a concurrent ForkProcess
+		// from interleaving between the Unlock and these stores.
 		page.Shared.Store(false)
 		page.ReadOnly.Store(false)
+		cow.mu.Unlock()
 		cow.copiesAvoided.Add(1)
 		return false, 0, nil
 	}

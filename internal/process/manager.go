@@ -54,24 +54,22 @@ func (pm *ProcessManager) CreateProcess(name string, priority int32, virtualPage
 // TerminateProcess terminates a process
 func (pm *ProcessManager) TerminateProcess(pid string) error {
 	pm.mu.Lock()
-	defer pm.mu.Unlock()
-
-	process, exists := pm.processes[pid]
+	_, exists := pm.processes[pid]
 	if !exists {
+		pm.mu.Unlock()
 		return fmt.Errorf("process %s not found", pid)
 	}
 
-	// Update process state
-	process.SetState(models.ProcessTerminated)
-
-	// Remove from memory manager
-	if err := pm.memoryManager.RemoveProcess(pid); err != nil {
-		return err
-	}
-
-	// Remove from our map
+	// Mark terminated and remove from map while still holding pm.mu.
+	pm.processes[pid].SetState(models.ProcessTerminated)
 	delete(pm.processes, pid)
+	pm.mu.Unlock()
 
+	// Call into memory manager WITHOUT holding pm.mu to prevent pm.mu → mm.mu deadlock.
+	if err := pm.memoryManager.RemoveProcess(pid); err != nil {
+		// Process is already removed from our map; log but don't re-insert.
+		return fmt.Errorf("TerminateProcess %s: memory cleanup failed: %w", pid, err)
+	}
 	return nil
 }
 

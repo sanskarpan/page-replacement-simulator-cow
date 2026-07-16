@@ -142,9 +142,7 @@ func (op *OptPlus) OnPageAccess(frame *models.Frame, write bool) {
 }
 
 func (op *OptPlus) OnPageFault(frame *models.Frame) {
-	op.mu.Lock()
-	defer op.mu.Unlock()
-	op.currentIndex++
+	// currentIndex is advanced only in OnPageAccess to avoid double-increment
 }
 
 func (op *OptPlus) OnPageEviction(frame *models.Frame) {}

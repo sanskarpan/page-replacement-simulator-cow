@@ -12,7 +12,6 @@ type WSClock struct {
 	name          string
 	hand          int32
 	workingSetAge time.Duration
-	currentTime   time.Time
 	mu            sync.RWMutex
 }
 
@@ -21,14 +20,11 @@ func NewWSClock(workingSetWindowMs int64) *WSClock {
 		name:          "WSClock",
 		hand:          0,
 		workingSetAge: time.Duration(workingSetWindowMs) * time.Millisecond,
-		currentTime:   time.Now(),
 	}
 }
 
 func (w *WSClock) SetTime(t time.Time) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	w.currentTime = t
+	// no-op: SelectVictim uses time.Now() for accurate age computation
 }
 
 func (w *WSClock) SelectVictim(frames []*models.Frame) (*models.Frame, error) {
@@ -56,7 +52,7 @@ func (w *WSClock) SelectVictim(frames []*models.Frame) (*models.Frame, error) {
 			continue
 		}
 
-		age := w.currentTime.Sub(frame.GetLastAccessTime())
+		age := time.Now().Sub(frame.GetLastAccessTime())
 
 		if frame.GetReferenceBit() {
 			frame.ClearReferenceBit()
@@ -78,7 +74,7 @@ func (w *WSClock) SelectVictim(frames []*models.Frame) (*models.Frame, error) {
 	for i := int32(0); i < numFrames; i++ {
 		frame := frames[i]
 		if !frame.IsFree() && !frame.IsPinned() {
-			age := w.currentTime.Sub(frame.GetLastAccessTime())
+			age := time.Now().Sub(frame.GetLastAccessTime())
 			if age > w.workingSetAge && !frame.IsModified() {
 				w.hand = (i + 1) % numFrames
 				return frame, nil
@@ -120,7 +116,6 @@ func (w *WSClock) Reset() {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.hand = 0
-	w.currentTime = time.Now()
 }
 
 func (w *WSClock) GetWorkingSetAge() time.Duration {

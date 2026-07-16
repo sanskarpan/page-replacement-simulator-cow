@@ -369,7 +369,8 @@ func (s *Simulator) RunScenario(scenario string) (*ScenarioResult, error) {
 	}
 
 	mm := s.processManager.GetMemoryManager()
-	if mm.GetAlgorithm().GetName() == "Optimal" {
+	algName := mm.GetAlgorithm().GetName()
+	if algName == "Optimal" || algName == "OPT+" {
 		if err := s.precomputeAndSetOptimal(scenario, mm); err != nil {
 			result.Error = err.Error()
 			return result, err

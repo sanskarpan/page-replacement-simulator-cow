@@ -36,7 +36,7 @@ func (s *Server) HandleGetProcess(w http.ResponseWriter, r *http.Request) {
 
 	process, err := s.processManager.GetProcess(pid)
 	if err != nil {
-		writeError(w, http.StatusNotFound, err.Error())
+		writeError(w, http.StatusNotFound, "process not found")
 		return
 	}
 
@@ -71,7 +71,7 @@ func (s *Server) HandleCreateProcess(w http.ResponseWriter, r *http.Request) {
 
 	process, err := s.processManager.CreateProcess(req.Name, req.Priority, req.VirtualPages)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeError(w, http.StatusInternalServerError, "failed to create process")
 		return
 	}
 
@@ -90,7 +90,7 @@ func (s *Server) HandleTerminateProcess(w http.ResponseWriter, r *http.Request) 
 	pid := vars["id"]
 
 	if err := s.processManager.TerminateProcess(pid); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeError(w, http.StatusInternalServerError, "failed to terminate process")
 		return
 	}
 
@@ -110,7 +110,7 @@ func (s *Server) HandleForkProcess(w http.ResponseWriter, r *http.Request) {
 
 	child, err := s.processManager.ForkProcess(pid)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeError(w, http.StatusInternalServerError, "failed to fork process")
 		return
 	}
 
@@ -138,7 +138,7 @@ func (s *Server) HandleAccessMemory(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.processManager.AccessMemory(req.ProcessID, req.VirtualPage, req.Write); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeError(w, http.StatusInternalServerError, "memory access failed")
 		return
 	}
 
@@ -158,7 +158,7 @@ func (s *Server) HandleGetPageTable(w http.ResponseWriter, r *http.Request) {
 
 	pageTable, err := s.memoryManager.GetPageTable(pid)
 	if err != nil {
-		writeError(w, http.StatusNotFound, err.Error())
+		writeError(w, http.StatusNotFound, "page table not found")
 		return
 	}
 
@@ -376,6 +376,13 @@ func (s *Server) HandleMapHugePage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A huge-page index N maps to virtual address N<<21. Indices >= 2^43 overflow
+	// a 64-bit address, so reject them before the shift is performed.
+	if req.HugePage > (1<<43)-1 {
+		writeError(w, http.StatusBadRequest, "huge_page index out of range")
+		return
+	}
+
 	frameID, err := s.memoryManager.MapHugePage(pid, req.HugePage)
 	if err != nil {
 		slog.Error("MapHugePage failed", "pid", pid, "hugepage_idx", req.HugePage, "error", err)
@@ -399,7 +406,7 @@ func (s *Server) HandleGetHugePages(w http.ResponseWriter, r *http.Request) {
 
 	pages, err := s.memoryManager.GetHugePages(pid)
 	if err != nil {
-		writeError(w, http.StatusNotFound, err.Error())
+		writeError(w, http.StatusNotFound, "process not found")
 		return
 	}
 	writeJSON(w, http.StatusOK, pages)
@@ -412,7 +419,7 @@ func (s *Server) HandleGetWorkingSet(w http.ResponseWriter, r *http.Request) {
 
 	info, err := s.memoryManager.GetWorkingSetInfo(pid)
 	if err != nil {
-		writeError(w, http.StatusNotFound, err.Error())
+		writeError(w, http.StatusNotFound, "process not found")
 		return
 	}
 	writeJSON(w, http.StatusOK, info)
@@ -425,7 +432,7 @@ func (s *Server) HandleGetMultiLevelPageTable(w http.ResponseWriter, r *http.Req
 
 	mpt, err := s.memoryManager.GetMultiLevelPageTable(pid)
 	if err != nil {
-		writeError(w, http.StatusNotFound, err.Error())
+		writeError(w, http.StatusNotFound, "process not found")
 		return
 	}
 
@@ -466,10 +473,14 @@ func (s *Server) HandleCompareAlgorithms(w http.ResponseWriter, r *http.Request)
 	if req.Scenario == "" {
 		req.Scenario = "mixed"
 	}
+	if req.Frames > 65536 {
+		writeError(w, http.StatusBadRequest, "frames exceeds maximum of 65536")
+		return
+	}
 
 	results, err := s.simulator.CompareAlgorithms(req.Scenario, req.Frames, req.TLB)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeError(w, http.StatusInternalServerError, "simulation failed")
 		return
 	}
 	writeJSON(w, http.StatusOK, results)
@@ -503,6 +514,9 @@ func (s *Server) HandleFrameCountSweep(w http.ResponseWriter, r *http.Request) {
 	if req.FrameMax <= req.FrameMin {
 		req.FrameMax = req.FrameMin * 8
 	}
+	if req.FrameMax > 65536 {
+		req.FrameMax = 65536
+	}
 	if req.TLB <= 0 {
 		req.TLB = 16
 	}
@@ -510,7 +524,7 @@ func (s *Server) HandleFrameCountSweep(w http.ResponseWriter, r *http.Request) {
 	frameCounts := geometricFrameRange(req.FrameMin, req.FrameMax, 10)
 	results, err := s.simulator.CompareFrameCounts(req.Scenario, req.Algorithm, frameCounts, req.TLB)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeError(w, http.StatusInternalServerError, "sweep failed")
 		return
 	}
 	writeJSON(w, http.StatusOK, results)
@@ -524,15 +538,16 @@ func (s *Server) HandleGetThrashingStatus(w http.ResponseWriter, r *http.Request
 
 // geometricFrameRange generates up to maxPoints frame counts in a geometric
 // progression from min to max (inclusive).
+// int64 intermediates prevent overflow when curr > MaxInt32/2.
 func geometricFrameRange(min, max int32, maxPoints int) []int32 {
 	result := []int32{min}
-	curr := min
-	for len(result) < maxPoints && curr < max {
+	curr := int64(min)
+	for len(result) < maxPoints && curr < int64(max) {
 		next := curr * 2
-		if next > max {
-			next = max
+		if next > int64(max) {
+			next = int64(max)
 		}
-		result = append(result, next)
+		result = append(result, int32(next))
 		curr = next
 	}
 	return result

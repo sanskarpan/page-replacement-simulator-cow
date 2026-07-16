@@ -58,6 +58,7 @@ func (s *Server) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 		slog.Error("websocket upgrade failed", "error", err)
 		return
 	}
+	conn.SetReadLimit(64 * 1024) // 64 KB is far more than needed for control messages
 
 	client := &Client{
 		server: s,

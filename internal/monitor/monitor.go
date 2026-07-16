@@ -137,7 +137,7 @@ func (mon *Monitor) detectThrashing() {
 	mon.historyMu.RUnlock()
 
 	deltaAccesses := newAccesses - oldAccesses
-	if deltaAccesses == 0 {
+	if deltaAccesses <= 0 {
 		return
 	}
 	windowFaultRate := float64(newFaults-oldFaults) / float64(deltaAccesses)
@@ -420,4 +420,10 @@ func (mon *Monitor) ClearHistory() {
 	mon.eventsMu.Lock()
 	mon.events = make([]Event, 0)
 	mon.eventsMu.Unlock()
+
+	// Reset thrash state so stale isThrashing=true doesn't persist after a reset.
+	mon.thrashMu.Lock()
+	mon.isThrashing = false
+	mon.thrashedAt = time.Time{}
+	mon.thrashMu.Unlock()
 }

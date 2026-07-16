@@ -220,9 +220,9 @@ async function loadScenarios() {
         const container = document.getElementById('scenarios-list');
 
         container.innerHTML = scenarios.map(s => `
-            <button class="scenario-btn" data-scenario="${s.name}">
-                <span class="scenario-name">${s.name}</span>
-                <span class="scenario-desc">${s.description}</span>
+            <button class="scenario-btn" data-scenario="${escapeHtml(s.name)}">
+                <span class="scenario-name">${escapeHtml(s.name)}</span>
+                <span class="scenario-desc">${escapeHtml(s.description)}</span>
             </button>
         `).join('');
 
@@ -241,8 +241,8 @@ async function loadScenarios() {
                     setTimeout(() => {
                         btn.disabled = false;
                         btn.innerHTML = `
-                            <span class="scenario-name">${scenario}</span>
-                            <span class="scenario-desc">${btn.querySelector('.scenario-desc').textContent}</span>
+                            <span class="scenario-name">${escapeHtml(scenario)}</span>
+                            <span class="scenario-desc">${escapeHtml(btn.querySelector('.scenario-desc').textContent)}</span>
                         `;
                     }, 1000);
                 }
@@ -502,10 +502,10 @@ function updateEventLog() {
 
         let dataStr = '';
         if (e.data) {
-            if (e.data.process_id) dataStr += `PID: ${e.data.process_id}`;
-            if (e.data.virtual_page) dataStr += ` Page: ${e.data.virtual_page}`;
-            if (e.data.scenario) dataStr += `Scenario: ${e.data.scenario}`;
-            if (e.data.algorithm) dataStr += `Algo: ${e.data.algorithm}`;
+            if (e.data.process_id) dataStr += `PID: ${escapeHtml(String(e.data.process_id))}`;
+            if (e.data.virtual_page) dataStr += ` Page: ${escapeHtml(String(e.data.virtual_page))}`;
+            if (e.data.scenario) dataStr += `Scenario: ${escapeHtml(String(e.data.scenario))}`;
+            if (e.data.algorithm) dataStr += `Algo: ${escapeHtml(String(e.data.algorithm))}`;
         }
 
         return `

@@ -212,14 +212,15 @@ func (mm *MemoryManager) AccessMemory(processID string, virtualPage uint64, writ
 
 	mm.mu.RLock()
 	process, exists := mm.processes[processID]
-	mm.mu.RUnlock()
 	if !exists {
+		mm.mu.RUnlock()
 		return fmt.Errorf("process %s not found", processID)
 	}
 
 	process.RecordMemoryAccess()
 
-	// Read-only TLB fast path: no shared-map writes needed, so no lock required.
+	// Read-only TLB fast path: held under mm.mu.RLock so mm.algorithm,
+	// the frame table, and page-table maps are all stable for this read.
 	if !write {
 		if frameNum, hit := mm.tlb.Lookup(processID, virtualPage); hit {
 			frame, _ := mm.frameTable.GetFrame(frameNum)
@@ -227,6 +228,7 @@ func (mm *MemoryManager) AccessMemory(processID string, virtualPage uint64, writ
 				mm.algorithm.OnPageAccess(frame, false)
 				process.RecordPageHit()
 				mm.metrics.RecordPageHit()
+				mm.mu.RUnlock()
 				mm.emitEvent("memory_access", map[string]interface{}{
 					"process_id":   processID,
 					"virtual_page": virtualPage,
@@ -238,6 +240,7 @@ func (mm *MemoryManager) AccessMemory(processID string, virtualPage uint64, writ
 			}
 		}
 	}
+	mm.mu.RUnlock()
 
 	// Write-lock section: handles TLB misses, page faults, and write CoW.
 	// Guards pageTables, recentAccesses, and pageTable.Entries (BUG-02, BUG-03, BUG-04 fix).
@@ -780,6 +783,11 @@ func (mm *MemoryManager) allocateFrameForPage(pageID uint64, processID string) (
 // MapHugePage allocates a 2MB huge-page mapping for a process and registers it
 // in the multi-level page table at L2 granularity.
 func (mm *MemoryManager) MapHugePage(processID string, hugePageIdx uint64) (int32, error) {
+	// Indices >= 2^43 cause hugePageIdx<<L2Shift (L2Shift=21) to overflow uint64.
+	if hugePageIdx > (1<<43)-1 {
+		return -1, fmt.Errorf("huge page index %d out of range (max %d)", hugePageIdx, uint64(1<<43)-1)
+	}
+
 	mm.mu.Lock()
 	defer mm.mu.Unlock()
 

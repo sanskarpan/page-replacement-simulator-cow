@@ -38,7 +38,9 @@ type Server struct {
 	clientsMu sync.RWMutex
 
 	// Broadcast channel
-	broadcast chan interface{}
+	broadcast       chan interface{}
+	broadcastClosed bool
+	broadcastMu     sync.RWMutex
 
 	// Monitor stop channel
 	monitorStop chan struct{}
@@ -80,7 +82,10 @@ func NewServer(numFrames int32, tlbSize int, algType algorithms.AlgorithmType) *
 // Shutdown cleanly shuts down the server
 func (s *Server) Shutdown() {
 	close(s.monitorStop)
+	s.broadcastMu.Lock()
+	s.broadcastClosed = true
 	close(s.broadcast)
+	s.broadcastMu.Unlock()
 	s.memoryManager.Close()
 }
 
@@ -134,6 +139,12 @@ func (s *Server) UnregisterClient(client *Client) {
 
 // Broadcast broadcasts a message to all clients
 func (s *Server) Broadcast(message interface{}) {
+	s.broadcastMu.RLock()
+	closed := s.broadcastClosed
+	s.broadcastMu.RUnlock()
+	if closed {
+		return
+	}
 	select {
 	case s.broadcast <- message:
 	default:
