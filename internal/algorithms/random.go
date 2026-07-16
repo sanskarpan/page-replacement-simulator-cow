@@ -22,8 +22,8 @@ func NewRandom() *Random {
 }
 
 func (r *Random) SelectVictim(frames []*models.Frame) (*models.Frame, error) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
+	r.mu.Lock()
+	defer r.mu.Unlock()
 
 	if len(frames) == 0 {
 		return nil, fmt.Errorf("no frames available for eviction")

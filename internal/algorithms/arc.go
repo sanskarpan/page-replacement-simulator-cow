@@ -68,6 +68,21 @@ func (a *ARC) SelectVictim(frames []*models.Frame) (*models.Frame, error) {
 			a.moveToB1(victimEntry)
 		}
 	} else {
+		// Clean up any stale T1/T2 entry for this pageID before recording B1 eviction.
+		for e := a.t1.Front(); e != nil; e = e.Next() {
+			if entry, ok := e.Value.(*arcEntry); ok && entry.pageID == pageID {
+				a.t1.Remove(e)
+				a.t1Size--
+				break
+			}
+		}
+		for e := a.t2.Front(); e != nil; e = e.Next() {
+			if entry, ok := e.Value.(*arcEntry); ok && entry.pageID == pageID {
+				a.t2.Remove(e)
+				a.t2Size--
+				break
+			}
+		}
 		a.b1.PushFront(&arcEntry{pageID: pageID, frameID: victimFrame.ID, key: a.getIndex()})
 		a.b1Size++
 		if a.b1Size > a.c {

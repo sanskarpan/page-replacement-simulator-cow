@@ -2,20 +2,43 @@ package api
 
 import (
 	"encoding/json"
-	"log"
+	"log/slog"
 	"net/http"
+	"strings"
 	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
 )
 
-var upgrader = websocket.Upgrader{
-	ReadBufferSize:  1024,
-	WriteBufferSize: 1024,
-	CheckOrigin: func(r *http.Request) bool {
-		return true // Allow all origins in development
-	},
+// newUpgrader returns a websocket.Upgrader whose CheckOrigin is tied to the
+// Server's allowed-origins list, preventing cross-site WebSocket hijacking.
+func (s *Server) newUpgrader() websocket.Upgrader {
+	return websocket.Upgrader{
+		ReadBufferSize:  1024,
+		WriteBufferSize: 1024,
+		CheckOrigin: func(r *http.Request) bool {
+			if s.allowAllOrigins {
+				return true
+			}
+			origin := r.Header.Get("Origin")
+			if origin == "" {
+				return true // same-origin request (no Origin header)
+			}
+			host := extractWSHost(origin)
+			return s.allowedOrigins[host]
+		},
+	}
+}
+
+// extractWSHost strips the scheme and port from an origin header value.
+func extractWSHost(origin string) string {
+	origin = strings.TrimPrefix(origin, "http://")
+	origin = strings.TrimPrefix(origin, "https://")
+	if idx := strings.IndexByte(origin, ':'); idx >= 0 {
+		origin = origin[:idx]
+	}
+	return origin
 }
 
 // Client represents a WebSocket client
@@ -29,11 +52,13 @@ type Client struct {
 
 // HandleWebSocket handles WebSocket connections
 func (s *Server) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
+	upgrader := s.newUpgrader()
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		log.Printf("WebSocket upgrade error: %v", err)
+		slog.Error("websocket upgrade failed", "error", err)
 		return
 	}
+	conn.SetReadLimit(64 * 1024) // 64 KB is far more than needed for control messages
 
 	client := &Client{
 		server: s,
@@ -84,7 +109,7 @@ func (c *Client) readPump() {
 		_, message, err := c.conn.ReadMessage()
 		if err != nil {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-				log.Printf("WebSocket error: %v", err)
+				slog.Warn("websocket unexpected close", "error", err)
 			}
 			break
 		}
@@ -120,7 +145,7 @@ func (c *Client) writePump() {
 			// Write the message
 			data, err := json.Marshal(message)
 			if err != nil {
-				log.Printf("JSON marshal error: %v", err)
+				slog.Error("websocket message marshal", "error", err)
 				return
 			}
 			w.Write(data)
@@ -142,7 +167,7 @@ func (c *Client) writePump() {
 func (c *Client) handleMessage(message []byte) {
 	var msg map[string]interface{}
 	if err := json.Unmarshal(message, &msg); err != nil {
-		log.Printf("JSON unmarshal error: %v", err)
+		slog.Warn("websocket message unmarshal", "error", err)
 		return
 	}
 
@@ -159,31 +184,44 @@ func (c *Client) handleMessage(message []byte) {
 		}
 
 	case "request_state":
-		// Send current state
-		c.send <- map[string]interface{}{
+		// Send current state; guard against sending on a closed channel when the
+		// client disconnects concurrently (done fires before send is closed).
+		msg := map[string]interface{}{
 			"type":      "state_update",
 			"status":    c.server.monitor.GetSystemStatus(),
 			"processes": c.server.monitor.GetProcessDetails(),
 			"frames":    c.server.monitor.GetFrameDetails(),
 		}
+		select {
+		case c.send <- msg:
+		case <-c.done:
+		}
 	}
 }
 
-// sendPeriodicMetrics sends metrics updates periodically
+// sendPeriodicMetrics sends metrics updates periodically.
+// The inner select on done prevents a panic when close(c.send) races with the
+// ticker firing: writePump closes done after closing send, so checking done
+// before sending guards the window where send is closed but done is not yet.
 func (c *Client) sendPeriodicMetrics() {
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 
 	for {
 		select {
+		case <-c.done:
+			return
 		case <-ticker.C:
 			metrics := c.server.memoryManager.GetMetrics()
-			c.send <- map[string]interface{}{
+			msg := map[string]interface{}{
 				"type":    "metrics_update",
 				"metrics": metrics,
 			}
-		case <-c.done:
-			return
+			select {
+			case c.send <- msg:
+			case <-c.done:
+				return
+			}
 		}
 	}
 }

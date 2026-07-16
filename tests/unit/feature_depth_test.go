@@ -319,7 +319,7 @@ func TestNUMAFrameLocalityAfterEnable(t *testing.T) {
 	// Determine which node this process maps to: selectLocalNode hashes processID % 2.
 	// We cannot call it directly, but we can observe frame IDs: node 0 → [0,8), node 1 → [8,16).
 	for _, f := range frames {
-		nodeID := f.NumaNodeID
+		nodeID := f.GetNumaNodeID()
 		framesPerNode := int32(16 / 2)
 		expectedStart := nodeID * framesPerNode
 		expectedEnd := expectedStart + framesPerNode
@@ -411,7 +411,7 @@ func TestClusteringAnchorKeyIsFirstPage(t *testing.T) {
 	}
 
 	// GetPrefetchPages with anchor=10 should return pages 11..26.
-	pages := cm.GetPrefetchPages(10)
+	pages := cm.GetPrefetchPages("p1", 10)
 	if len(pages) == 0 {
 		t.Fatal("GetPrefetchPages with anchor=10 returned no pages")
 	}
@@ -420,7 +420,7 @@ func TestClusteringAnchorKeyIsFirstPage(t *testing.T) {
 	}
 
 	// GetPrefetchPages with the LAST page (12) should return nothing — the old bug.
-	badPages := cm.GetPrefetchPages(12)
+	badPages := cm.GetPrefetchPages("p1", 12)
 	if len(badPages) != 0 {
 		t.Errorf("GetPrefetchPages(lastPage=12) should return nothing, got %v", badPages)
 	}
@@ -436,7 +436,7 @@ func TestClusteringNonSequentialNoCluster(t *testing.T) {
 		t.Error("DetectSequential should return nil for non-consecutive pages")
 	}
 
-	pages := cm.GetPrefetchPages(5)
+	pages := cm.GetPrefetchPages("p1", 5)
 	if len(pages) != 0 {
 		t.Errorf("expected no prefetch pages for non-sequential, got %v", pages)
 	}

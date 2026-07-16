@@ -1,3 +1,6 @@
+// Package memory implements the virtual-memory subsystem: frame allocation,
+// page-table management, TLB, Copy-on-Write, huge pages, NUMA placement,
+// memory compression, and page-clustering.  The central type is MemoryManager.
 package memory
 
 import (
@@ -209,14 +212,15 @@ func (mm *MemoryManager) AccessMemory(processID string, virtualPage uint64, writ
 
 	mm.mu.RLock()
 	process, exists := mm.processes[processID]
-	mm.mu.RUnlock()
 	if !exists {
+		mm.mu.RUnlock()
 		return fmt.Errorf("process %s not found", processID)
 	}
 
 	process.RecordMemoryAccess()
 
-	// Read-only TLB fast path: no shared-map writes needed, so no lock required.
+	// Read-only TLB fast path: held under mm.mu.RLock so mm.algorithm,
+	// the frame table, and page-table maps are all stable for this read.
 	if !write {
 		if frameNum, hit := mm.tlb.Lookup(processID, virtualPage); hit {
 			frame, _ := mm.frameTable.GetFrame(frameNum)
@@ -224,6 +228,7 @@ func (mm *MemoryManager) AccessMemory(processID string, virtualPage uint64, writ
 				mm.algorithm.OnPageAccess(frame, false)
 				process.RecordPageHit()
 				mm.metrics.RecordPageHit()
+				mm.mu.RUnlock()
 				mm.emitEvent("memory_access", map[string]interface{}{
 					"process_id":   processID,
 					"virtual_page": virtualPage,
@@ -235,6 +240,7 @@ func (mm *MemoryManager) AccessMemory(processID string, virtualPage uint64, writ
 			}
 		}
 	}
+	mm.mu.RUnlock()
 
 	// Write-lock section: handles TLB misses, page faults, and write CoW.
 	// Guards pageTables, recentAccesses, and pageTable.Entries (BUG-02, BUG-03, BUG-04 fix).
@@ -331,7 +337,7 @@ func (mm *MemoryManager) tryPrefetch(processID string) {
 	}
 	// anchor = first page of the last 3-page sequential window detected by DetectSequential
 	anchor := pages[len(pages)-3]
-	prefetchPages := mm.clusterManager.GetPrefetchPages(anchor)
+	prefetchPages := mm.clusterManager.GetPrefetchPages(processID, anchor)
 	if len(prefetchPages) == 0 {
 		return
 	}
@@ -373,6 +379,9 @@ func (mm *MemoryManager) handlePageFault(processID string, page *models.Page, wr
 			frame, err := mm.allocateFrameForPage(page.ID, processID)
 			if err != nil {
 				if evErr := mm.atomicEvictAndAlloc(page, processID); evErr != nil {
+					// Restore compressed entry to prevent data loss when frame
+					// allocation fails after DecompressPage deleted it.
+					mm.compressionManager.RestoreCompressed(cp)
 					return fmt.Errorf("handlePageFault (compressed): %w", evErr)
 				}
 			} else {
@@ -433,7 +442,7 @@ func (mm *MemoryManager) atomicEvictAndAlloc(page *models.Page, processID string
 	frame := victim
 	frame.Allocate(page.ID, processID)
 	if mm.numaEnabled {
-		frame.NumaNodeID = mm.selectLocalNode(processID)
+		frame.SetNumaNodeID(mm.selectLocalNode(processID))
 	}
 	page.SetFrame(frame.ID)
 	if mpt, ok := mm.multiLevelPT[processID]; ok {
@@ -476,7 +485,7 @@ func (mm *MemoryManager) handleCoW(processID string, page *models.Page, frame *m
 	}
 
 	if mm.numaEnabled {
-		newFrame.NumaNodeID = mm.selectLocalNode(processID)
+		newFrame.SetNumaNodeID(mm.selectLocalNode(processID))
 	}
 
 	// Register the new CoW frame with the replacement algorithm so ARC/CAR
@@ -486,7 +495,7 @@ func (mm *MemoryManager) handleCoW(processID string, page *models.Page, frame *m
 	newPage.SetFrame(newFrame.ID)
 
 	pageTable := mm.pageTables[processID]
-	pageTable.Entries[page.ID] = newPage
+	pageTable.ReplaceEntry(page.ID, newPage)
 
 	mm.tlb.Invalidate(processID, page.ID)
 	// Use the original virtual page ID so post-CoW accesses hit the TLB
@@ -694,7 +703,7 @@ func (mm *MemoryManager) emitEvent(event string, data map[string]interface{}) {
 	select {
 	case mm.eventCh <- eventMsg{event: event, data: data}:
 	default:
-		// Channel full: drop rather than blocking the caller (BUG-09 fix).
+		mm.metrics.DroppedEvents.Add(1)
 	}
 }
 
@@ -761,12 +770,19 @@ func hashString(s string) uint64 {
 func (mm *MemoryManager) allocateFrameForPage(pageID uint64, processID string) (*models.Frame, error) {
 	if mm.numaEnabled {
 		nodeID := mm.selectLocalNode(processID)
-		framesPerNode := mm.numFrames / 2
-		start := nodeID * framesPerNode
-		end := start + framesPerNode
+		node0End := mm.numFrames / 2
+		node1End := mm.numFrames
+		var start, end int32
+		if nodeID == 0 {
+			start = 0
+			end = node0End
+		} else {
+			start = node0End
+			end = node1End
+		}
 		frame, err := mm.frameTable.AllocateFrameInRange(start, end, pageID, processID)
 		if err == nil {
-			frame.NumaNodeID = nodeID
+			frame.SetNumaNodeID(nodeID)
 			return frame, nil
 		}
 		// NUMA node full — fall through to global allocation
@@ -777,6 +793,11 @@ func (mm *MemoryManager) allocateFrameForPage(pageID uint64, processID string) (
 // MapHugePage allocates a 2MB huge-page mapping for a process and registers it
 // in the multi-level page table at L2 granularity.
 func (mm *MemoryManager) MapHugePage(processID string, hugePageIdx uint64) (int32, error) {
+	// Indices >= 2^43 cause hugePageIdx<<L2Shift (L2Shift=21) to overflow uint64.
+	if hugePageIdx > (1<<43)-1 {
+		return -1, fmt.Errorf("huge page index %d out of range (max %d)", hugePageIdx, uint64(1<<43)-1)
+	}
+
 	mm.mu.Lock()
 	defer mm.mu.Unlock()
 
@@ -861,12 +882,23 @@ func (mm *MemoryManager) updateWorkingSet(processID string, virtualPage uint64) 
 	}
 	mm.workingSetAccesses[processID] = ws
 
-	seen := make(map[uint64]struct{}, window)
-	for _, p := range ws {
-		seen[p] = struct{}{}
+	// O(n²) uniqueness count avoids a heap allocation per access for the small
+	// working-set windows typical in this simulator (window ≤ 64 by default).
+	unique := 0
+	for i, p := range ws {
+		dup := false
+		for j := 0; j < i; j++ {
+			if ws[j] == p {
+				dup = true
+				break
+			}
+		}
+		if !dup {
+			unique++
+		}
 	}
 	if proc := mm.processes[processID]; proc != nil {
-		proc.UpdateWorkingSetSize(int32(len(seen)))
+		proc.UpdateWorkingSetSize(int32(unique))
 	}
 }
 
@@ -901,6 +933,13 @@ func (mm *MemoryManager) enforcePFFResident(target int32) {
 		if err := mm.evictPage(victim); err != nil {
 			break
 		}
-		usedFrames = mm.frameTable.GetUsedFrames()
+		// Remove the evicted frame from the local slice to avoid an
+		// extra GetUsedFrames() allocation on each loop iteration.
+		for i, f := range usedFrames {
+			if f.ID == victim.ID {
+				usedFrames = append(usedFrames[:i], usedFrames[i+1:]...)
+				break
+			}
+		}
 	}
 }

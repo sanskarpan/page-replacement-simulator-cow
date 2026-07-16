@@ -62,7 +62,7 @@ func (c *CAR) SelectVictim(frames []*models.Frame) (*models.Frame, error) {
 				break
 			}
 			c.t1Hand = c.t1Hand % len(c.t1)
-			if c.t1Hand < 0 {
+			if c.t1Hand < 0 { // dead guard: % of a non-negative int is always ≥ 0
 				c.t1Hand = 0
 			}
 			entry := c.t1[c.t1Hand]
@@ -92,7 +92,7 @@ func (c *CAR) SelectVictim(frames []*models.Frame) (*models.Frame, error) {
 				break
 			}
 			c.t2Hand = c.t2Hand % len(c.t2)
-			if c.t2Hand < 0 {
+			if c.t2Hand < 0 { // dead guard: % of a non-negative int is always ≥ 0
 				c.t2Hand = 0
 			}
 			entry := c.t2[c.t2Hand]

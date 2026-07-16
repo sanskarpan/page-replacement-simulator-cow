@@ -102,11 +102,7 @@ func (opt *Optimal) OnPageAccess(frame *models.Frame, write bool) {
 
 // OnPageFault is called when a page fault occurs
 func (opt *Optimal) OnPageFault(frame *models.Frame) {
-	opt.mu.Lock()
-	defer opt.mu.Unlock()
-
-	// Advance current index
-	opt.currentIndex++
+	// currentIndex is advanced only in OnPageAccess to avoid double-increment
 }
 
 // OnPageEviction is called when a page is evicted

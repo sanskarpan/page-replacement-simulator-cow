@@ -72,6 +72,8 @@ func (c *CLOCK) SelectVictim(frames []*models.Frame) (*models.Frame, error) {
 		}
 	}
 
+	// Unreachable: the inner loop always returns above once all reference bits
+	// have been cleared (worst case: two full sweeps). Required by the compiler.
 	return nil, fmt.Errorf("no evictable frame found")
 }
 

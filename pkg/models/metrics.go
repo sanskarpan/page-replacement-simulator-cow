@@ -38,6 +38,9 @@ type Metrics struct {
 	AvgSearchTimeNs  atomic.Int64
 	LastEvictionTimeNs atomic.Int64
 
+	// Observability
+	DroppedEvents atomic.Int64 // events dropped because the internal channel was full
+
 	// Process statistics
 	TotalProcesses   atomic.Int32
 	ActiveProcesses  atomic.Int32
@@ -72,6 +75,7 @@ func NewMetrics(totalFrames int32) *Metrics {
 	m.LastEvictionTimeNs.Store(0)
 	m.TotalProcesses.Store(0)
 	m.ActiveProcesses.Store(0)
+	m.DroppedEvents.Store(0)
 	return m
 }
 
@@ -144,9 +148,13 @@ func (m *Metrics) GetPageHitRate() float64 {
 	return float64(hits) / float64(accesses)
 }
 
-// GetUptime returns the system uptime
+// GetUptime returns the system uptime.
+// StartTime is read under m.mu to avoid a data race with Reset().
 func (m *Metrics) GetUptime() time.Duration {
-	return time.Since(m.StartTime)
+	m.mu.RLock()
+	t := m.StartTime
+	m.mu.RUnlock()
+	return time.Since(t)
 }
 
 // GetSnapshot returns a snapshot of current metrics
@@ -187,34 +195,36 @@ func (m *Metrics) GetSnapshotWithStats(usedFrames, freeFrames, pinnedFrames, pag
 		PageFaultRate:      m.GetPageFaultRate(),
 		PageHitRate:        m.GetPageHitRate(),
 		Uptime:             m.GetUptime(),
+		DroppedEvents:      m.DroppedEvents.Load(),
 	}
 }
 
 // MetricsSnapshot is a point-in-time snapshot of metrics
 type MetricsSnapshot struct {
-	TotalFrames        int32
-	UsedFrames         int32
-	FreeFrames         int32
-	PinnedFrames       int32
-	TotalPages         int64
-	PagesInMemory      int32
-	SharedPages        int32
-	DirtyPages         int32
-	PageFaults         int64
-	PageHits           int64
-	TotalAccesses      int64
-	CoWCopies          int64
-	CoWSaves           int64
-	SharedPageReads    int64
-	Evictions          int64
-	DirtyEvictions     int64
-	AvgSearchTimeNs    int64
-	LastEvictionTimeNs  int64
-	TotalProcesses     int32
-	ActiveProcesses    int32
-	PageFaultRate      float64
-	PageHitRate        float64
-	Uptime             time.Duration
+	TotalFrames        int32         `json:"total_frames"`
+	UsedFrames         int32         `json:"used_frames"`
+	FreeFrames         int32         `json:"free_frames"`
+	PinnedFrames       int32         `json:"pinned_frames"`
+	TotalPages         int64         `json:"total_pages"`
+	PagesInMemory      int32         `json:"pages_in_memory"`
+	SharedPages        int32         `json:"shared_pages"`
+	DirtyPages         int32         `json:"dirty_pages"`
+	PageFaults         int64         `json:"page_faults"`
+	PageHits           int64         `json:"page_hits"`
+	TotalAccesses      int64         `json:"total_accesses"`
+	CoWCopies          int64         `json:"cow_copies"`
+	CoWSaves           int64         `json:"cow_saves"`
+	SharedPageReads    int64         `json:"shared_page_reads"`
+	Evictions          int64         `json:"evictions"`
+	DirtyEvictions     int64         `json:"dirty_evictions"`
+	AvgSearchTimeNs    int64         `json:"avg_search_time_ns"`
+	LastEvictionTimeNs int64         `json:"last_eviction_time_ns"`
+	TotalProcesses     int32         `json:"total_processes"`
+	ActiveProcesses    int32         `json:"active_processes"`
+	PageFaultRate      float64       `json:"page_fault_rate"`
+	PageHitRate        float64       `json:"page_hit_rate"`
+	Uptime             time.Duration `json:"uptime_ns"`
+	DroppedEvents      int64         `json:"dropped_events"`
 }
 
 // Reset resets all metrics
@@ -239,5 +249,6 @@ func (m *Metrics) Reset() {
 	m.DirtyEvictions.Store(0)
 	m.AvgSearchTimeNs.Store(0)
 	m.LastEvictionTimeNs.Store(0)
+	m.DroppedEvents.Store(0)
 	m.StartTime = time.Now()
 }

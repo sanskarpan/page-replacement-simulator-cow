@@ -131,30 +131,43 @@ func (pt *PageTable) Size() int {
 	return len(pt.Entries)
 }
 
-// Clone creates a copy of this page table for fork/CoW
+// Clone creates a copy of this page table for fork/CoW.
+// Each page's mutable fields (FrameNumber, Present, State, …) are snapshotted
+// atomically under page.mu to prevent a torn read when a concurrent SetFrame
+// or eviction races with the clone.
 func (pt *PageTable) Clone(newProcessID string) *PageTable {
 	pt.mu.RLock()
 	defer pt.mu.RUnlock()
 
 	newPT := NewPageTable(newProcessID)
 	for vpn, page := range pt.Entries {
-		// Create shallow copy - pages will be shared initially
+		// Hold page's read lock for the duration of the per-page snapshot so we
+		// see a consistent view of FrameNumber + Present together.
+		page.LockShared()
+		frameNum := page.FrameNumber
+		state := page.State.Load()
+		lastAccessed := page.LastAccessed.Load()
+		refBit := page.ReferenceBit.Load()
+		refCount := page.RefCount.Load()
+		present := page.Present.Load()
+		page.UnlockShared()
+
 		newPage := &models.Page{
 			ID:           page.ID,
 			ProcessID:    newProcessID,
-			FrameNumber:  page.GetFrame(),
+			FrameNumber:  frameNum,
 			OriginalPage: page.ID,
 			CreatedAt:    page.CreatedAt,
 		}
-		newPage.State.Store(page.State.Load())
-		newPage.LastAccessed.Store(page.LastAccessed.Load())
+		newPage.State.Store(state)
+		newPage.LastAccessed.Store(lastAccessed)
 		newPage.AccessCount.Store(0)
-		newPage.ReferenceBit.Store(page.ReferenceBit.Load())
-		newPage.RefCount.Store(page.RefCount.Load())
-		newPage.Present.Store(page.Present.Load())
-		newPage.Shared.Store(true) // Mark as shared for CoW
+		newPage.ReferenceBit.Store(refBit)
+		newPage.RefCount.Store(refCount)
+		newPage.Present.Store(present)
+		newPage.Shared.Store(true)
 		newPage.Dirty.Store(false)
-		newPage.ReadOnly.Store(true) // Mark as read-only
+		newPage.ReadOnly.Store(true)
 
 		newPT.Entries[vpn] = newPage
 	}
@@ -203,10 +216,19 @@ func (pt *PageTable) GetStats() PageTableStats {
 	return stats
 }
 
+// ReplaceEntry atomically replaces an existing page-table entry.
+// Used during CoW to substitute a new private page for a shared one
+// while holding the page-table's own mutex rather than bypassing it.
+func (pt *PageTable) ReplaceEntry(virtualPage uint64, page *models.Page) {
+	pt.mu.Lock()
+	defer pt.mu.Unlock()
+	pt.Entries[virtualPage] = page
+}
+
 // PageTableStats contains statistics about a page table
 type PageTableStats struct {
-	TotalPages   int
-	PresentPages int
-	SharedPages  int
-	DirtyPages   int
+	TotalPages   int `json:"total_pages"`
+	PresentPages int `json:"present_pages"`
+	SharedPages  int `json:"shared_pages"`
+	DirtyPages   int `json:"dirty_pages"`
 }

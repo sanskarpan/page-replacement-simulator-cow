@@ -117,6 +117,9 @@ func (mlpt *MultiLevelPageTable) SetEntry(virtualAddr uint64, frameNumber int32,
 		return entry
 	}
 
+	l2Table.isHuge[l2] = false
+	l2Table.hugePageEntries[l2] = nil
+
 	if l2Table.entries[l2] == nil {
 		l2Table.entries[l2] = &Level1Table{}
 	}
@@ -148,6 +151,7 @@ func (mlpt *MultiLevelPageTable) InvalidateEntry(virtualAddr uint64) {
 			l2Table.hugePageEntries[l2].Present.Store(false)
 			l2Table.hugePageEntries[l2].FrameNumber = -1
 		}
+		l2Table.isHuge[l2] = false
 		return
 	}
 

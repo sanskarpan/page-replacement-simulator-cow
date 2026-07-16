@@ -2,13 +2,56 @@ package api
 
 import (
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"strconv"
 
 	"github.com/gorilla/mux"
 	"github.com/page-replacement-cow/internal/algorithms"
 	"github.com/page-replacement-cow/internal/memory"
+	"github.com/page-replacement-cow/pkg/models"
 )
+
+// processJSON is a serialization-safe view of models.Process.
+// Atomic fields in models.Process do not marshal as numbers with encoding/json,
+// so this DTO loads them via their Load() methods before encoding.
+type processJSON struct {
+	ID             string   `json:"id"`
+	Name           string   `json:"name"`
+	Priority       int32    `json:"priority"`
+	State          int32    `json:"state"`
+	VirtualPages   uint64   `json:"virtual_pages"`
+	PageTableSize  uint64   `json:"page_table_size"`
+	WorkingSetSize int32    `json:"working_set_size"`
+	PageFaults     int64    `json:"page_faults"`
+	PageHits       int64    `json:"page_hits"`
+	MemoryAccesses int64    `json:"memory_accesses"`
+	CoWCopies      int64    `json:"cow_copies"`
+	CPUTimeNs      int64    `json:"cpu_time_ns"`
+	ParentID       string   `json:"parent_id"`
+	Children       []string `json:"children"`
+	CreatedAt      int64    `json:"created_at_ns"`
+}
+
+func marshalProcess(p *models.Process) processJSON {
+	return processJSON{
+		ID:             p.ID,
+		Name:           p.Name,
+		Priority:       p.Priority,
+		State:          p.State.Load(),
+		VirtualPages:   p.VirtualPages,
+		PageTableSize:  p.PageTableSize,
+		WorkingSetSize: p.WorkingSetSize,
+		PageFaults:     p.PageFaults.Load(),
+		PageHits:       p.PageHits.Load(),
+		MemoryAccesses: p.MemoryAccesses.Load(),
+		CoWCopies:      p.CoWCopies.Load(),
+		CPUTimeNs:      p.CPUTime.Load(),
+		ParentID:       p.ParentID,
+		Children:       p.GetChildren(),
+		CreatedAt:      p.CreatedAt.UnixNano(),
+	}
+}
 
 // HandleGetStatus returns system status
 func (s *Server) HandleGetStatus(w http.ResponseWriter, r *http.Request) {
@@ -35,11 +78,11 @@ func (s *Server) HandleGetProcess(w http.ResponseWriter, r *http.Request) {
 
 	process, err := s.processManager.GetProcess(pid)
 	if err != nil {
-		writeError(w, http.StatusNotFound, err.Error())
+		writeError(w, http.StatusNotFound, "process not found")
 		return
 	}
 
-	writeJSON(w, http.StatusOK, process)
+	writeJSON(w, http.StatusOK, marshalProcess(process))
 }
 
 // HandleCreateProcess creates a new process
@@ -70,17 +113,19 @@ func (s *Server) HandleCreateProcess(w http.ResponseWriter, r *http.Request) {
 
 	process, err := s.processManager.CreateProcess(req.Name, req.Priority, req.VirtualPages)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeError(w, http.StatusInternalServerError, "failed to create process")
 		return
 	}
+
+	dto := marshalProcess(process)
 
 	// Broadcast update
 	s.Broadcast(map[string]interface{}{
 		"type":    "process_created",
-		"process": process,
+		"process": dto,
 	})
 
-	writeJSON(w, http.StatusCreated, process)
+	writeJSON(w, http.StatusCreated, dto)
 }
 
 // HandleTerminateProcess terminates a process
@@ -89,7 +134,7 @@ func (s *Server) HandleTerminateProcess(w http.ResponseWriter, r *http.Request) 
 	pid := vars["id"]
 
 	if err := s.processManager.TerminateProcess(pid); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeError(w, http.StatusInternalServerError, "failed to terminate process")
 		return
 	}
 
@@ -109,18 +154,20 @@ func (s *Server) HandleForkProcess(w http.ResponseWriter, r *http.Request) {
 
 	child, err := s.processManager.ForkProcess(pid)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeError(w, http.StatusInternalServerError, "failed to fork process")
 		return
 	}
+
+	childDTO := marshalProcess(child)
 
 	// Broadcast update
 	s.Broadcast(map[string]interface{}{
 		"type":   "process_forked",
 		"parent": pid,
-		"child":  child,
+		"child":  childDTO,
 	})
 
-	writeJSON(w, http.StatusCreated, child)
+	writeJSON(w, http.StatusCreated, childDTO)
 }
 
 // HandleAccessMemory performs a memory access
@@ -137,7 +184,7 @@ func (s *Server) HandleAccessMemory(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.processManager.AccessMemory(req.ProcessID, req.VirtualPage, req.Write); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeError(w, http.StatusInternalServerError, "memory access failed")
 		return
 	}
 
@@ -157,7 +204,7 @@ func (s *Server) HandleGetPageTable(w http.ResponseWriter, r *http.Request) {
 
 	pageTable, err := s.memoryManager.GetPageTable(pid)
 	if err != nil {
-		writeError(w, http.StatusNotFound, err.Error())
+		writeError(w, http.StatusNotFound, "page table not found")
 		return
 	}
 
@@ -166,30 +213,14 @@ func (s *Server) HandleGetPageTable(w http.ResponseWriter, r *http.Request) {
 
 // HandleGetHistory returns historical metrics
 func (s *Server) HandleGetHistory(w http.ResponseWriter, r *http.Request) {
-	lastStr := r.URL.Query().Get("last")
-	last := 100
-
-	if lastStr != "" {
-		if val, err := strconv.Atoi(lastStr); err == nil {
-			last = val
-		}
-	}
-
+	last := clampedQueryInt(r, "last", 100, 1, maxHistoryItems)
 	history := s.monitor.GetHistory(last)
 	writeJSON(w, http.StatusOK, history)
 }
 
 // HandleGetEvents returns recent events
 func (s *Server) HandleGetEvents(w http.ResponseWriter, r *http.Request) {
-	lastStr := r.URL.Query().Get("last")
-	last := 50
-
-	if lastStr != "" {
-		if val, err := strconv.Atoi(lastStr); err == nil {
-			last = val
-		}
-	}
-
+	last := clampedQueryInt(r, "last", 50, 1, maxHistoryItems)
 	events := s.monitor.GetEvents(last)
 	writeJSON(w, http.StatusOK, events)
 }
@@ -205,34 +236,8 @@ func (s *Server) HandleSetAlgorithm(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var algType algorithms.AlgorithmType
-
-	switch req.Algorithm {
-	case "LRU":
-		algType = algorithms.AlgorithmLRU
-	case "CLOCK":
-		algType = algorithms.AlgorithmCLOCK
-	case "LFU":
-		algType = algorithms.AlgorithmLFU
-	case "FIFO":
-		algType = algorithms.AlgorithmFIFO
-	case "Optimal":
-		algType = algorithms.AlgorithmOptimal
-	case "Random":
-		algType = algorithms.AlgorithmRandom
-	case "ARC":
-		algType = algorithms.AlgorithmARC
-	case "CAR":
-		algType = algorithms.AlgorithmCAR
-	case "WSClock":
-		algType = algorithms.AlgorithmWSClock
-	case "PFF":
-		algType = algorithms.AlgorithmPFF
-	case "OPT+":
-		algType = algorithms.AlgorithmOPTPlus
-	case "NRU":
-		algType = algorithms.AlgorithmNRU
-	default:
+	algType, ok := algorithms.ParseAlgorithmType(req.Algorithm)
+	if !ok {
 		writeError(w, http.StatusBadRequest, "invalid algorithm")
 		return
 	}
@@ -248,7 +253,8 @@ func (s *Server) HandleSetAlgorithm(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"algorithm": req.Algorithm})
 }
 
-// HandleRunSimulation runs a simulation scenario
+// HandleRunSimulation runs a simulation scenario.
+// At most one simulation may run at a time; concurrent requests get 409.
 func (s *Server) HandleRunSimulation(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Scenario string `json:"scenario"`
@@ -258,14 +264,25 @@ func (s *Server) HandleRunSimulation(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
+	if req.Scenario == "" {
+		writeError(w, http.StatusBadRequest, "scenario is required")
+		return
+	}
 
-	// Run simulation in background
+	if !s.simulationMu.TryLock() {
+		writeError(w, http.StatusConflict, "a simulation is already running")
+		return
+	}
+
 	go func() {
+		defer s.simulationMu.Unlock()
+
 		result, err := s.simulator.RunScenario(req.Scenario)
 		if err != nil {
+			// Do not leak internal error details over the wire.
+			slog.Error("simulation failed", "scenario", req.Scenario, "error", err)
 			s.Broadcast(map[string]interface{}{
-				"type":    "simulation_error",
-				"error":   err.Error(),
+				"type":     "simulation_error",
 				"scenario": req.Scenario,
 			})
 			return
@@ -355,7 +372,8 @@ func (s *Server) HandleEnableFeature(w http.ResponseWriter, r *http.Request) {
 	case "clustering":
 		s.memoryManager.EnableClustering(req.Enabled)
 	default:
-		writeError(w, http.StatusBadRequest, "unknown feature: "+req.Feature)
+		// Do not echo back req.Feature; it is untrusted user input.
+		writeError(w, http.StatusBadRequest, "unknown feature; valid values: numa, compression, clustering")
 		return
 	}
 
@@ -378,9 +396,17 @@ func (s *Server) HandleMapHugePage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A huge-page index N maps to virtual address N<<21. Indices >= 2^43 overflow
+	// a 64-bit address, so reject them before the shift is performed.
+	if req.HugePage > (1<<43)-1 {
+		writeError(w, http.StatusBadRequest, "huge_page index out of range")
+		return
+	}
+
 	frameID, err := s.memoryManager.MapHugePage(pid, req.HugePage)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		slog.Error("MapHugePage failed", "pid", pid, "hugepage_idx", req.HugePage, "error", err)
+		writeError(w, http.StatusInternalServerError, "failed to map huge page")
 		return
 	}
 
@@ -400,7 +426,7 @@ func (s *Server) HandleGetHugePages(w http.ResponseWriter, r *http.Request) {
 
 	pages, err := s.memoryManager.GetHugePages(pid)
 	if err != nil {
-		writeError(w, http.StatusNotFound, err.Error())
+		writeError(w, http.StatusNotFound, "process not found")
 		return
 	}
 	writeJSON(w, http.StatusOK, pages)
@@ -413,7 +439,7 @@ func (s *Server) HandleGetWorkingSet(w http.ResponseWriter, r *http.Request) {
 
 	info, err := s.memoryManager.GetWorkingSetInfo(pid)
 	if err != nil {
-		writeError(w, http.StatusNotFound, err.Error())
+		writeError(w, http.StatusNotFound, "process not found")
 		return
 	}
 	writeJSON(w, http.StatusOK, info)
@@ -426,7 +452,7 @@ func (s *Server) HandleGetMultiLevelPageTable(w http.ResponseWriter, r *http.Req
 
 	mpt, err := s.memoryManager.GetMultiLevelPageTable(pid)
 	if err != nil {
-		writeError(w, http.StatusNotFound, err.Error())
+		writeError(w, http.StatusNotFound, "process not found")
 		return
 	}
 
@@ -467,10 +493,14 @@ func (s *Server) HandleCompareAlgorithms(w http.ResponseWriter, r *http.Request)
 	if req.Scenario == "" {
 		req.Scenario = "mixed"
 	}
+	if req.Frames > 65536 {
+		writeError(w, http.StatusBadRequest, "frames exceeds maximum of 65536")
+		return
+	}
 
 	results, err := s.simulator.CompareAlgorithms(req.Scenario, req.Frames, req.TLB)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeError(w, http.StatusInternalServerError, "simulation failed")
 		return
 	}
 	writeJSON(w, http.StatusOK, results)
@@ -504,6 +534,9 @@ func (s *Server) HandleFrameCountSweep(w http.ResponseWriter, r *http.Request) {
 	if req.FrameMax <= req.FrameMin {
 		req.FrameMax = req.FrameMin * 8
 	}
+	if req.FrameMax > 65536 {
+		req.FrameMax = 65536
+	}
 	if req.TLB <= 0 {
 		req.TLB = 16
 	}
@@ -511,7 +544,7 @@ func (s *Server) HandleFrameCountSweep(w http.ResponseWriter, r *http.Request) {
 	frameCounts := geometricFrameRange(req.FrameMin, req.FrameMax, 10)
 	results, err := s.simulator.CompareFrameCounts(req.Scenario, req.Algorithm, frameCounts, req.TLB)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeError(w, http.StatusInternalServerError, "sweep failed")
 		return
 	}
 	writeJSON(w, http.StatusOK, results)
@@ -525,18 +558,34 @@ func (s *Server) HandleGetThrashingStatus(w http.ResponseWriter, r *http.Request
 
 // geometricFrameRange generates up to maxPoints frame counts in a geometric
 // progression from min to max (inclusive).
+// int64 intermediates prevent overflow when curr > MaxInt32/2.
 func geometricFrameRange(min, max int32, maxPoints int) []int32 {
 	result := []int32{min}
-	curr := min
-	for len(result) < maxPoints && curr < max {
+	curr := int64(min)
+	for len(result) < maxPoints && curr < int64(max) {
 		next := curr * 2
-		if next > max {
-			next = max
+		if next > int64(max) {
+			next = int64(max)
 		}
-		result = append(result, next)
+		result = append(result, int32(next))
 		curr = next
 	}
 	return result
+}
+
+// HandleHealthz is a liveness probe — returns 200 when the process is alive.
+func (s *Server) HandleHealthz(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// HandleReadyz is a readiness probe — returns 200 once the simulation engine
+// is fully initialized and able to serve traffic.
+func (s *Server) HandleReadyz(w http.ResponseWriter, r *http.Request) {
+	if s.memoryManager == nil || s.processManager == nil {
+		writeError(w, http.StatusServiceUnavailable, "not ready")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
 }
 
 // Helper functions
@@ -544,16 +593,40 @@ func geometricFrameRange(min, max int32, maxPoints int) []int32 {
 func writeJSON(w http.ResponseWriter, status int, data interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(data)
+	if err := json.NewEncoder(w).Encode(data); err != nil {
+		slog.Error("writeJSON encode", "error", err)
+	}
 }
 
 func writeError(w http.ResponseWriter, status int, message string) {
 	writeJSON(w, status, map[string]string{"error": message})
 }
 
+// clampedQueryInt reads a URL query parameter as an integer, returning
+// defaultVal if absent or unparseable, and clamping to [min, max].
+func clampedQueryInt(r *http.Request, param string, defaultVal, min, max int) int {
+	val := defaultVal
+	if s := r.URL.Query().Get(param); s != "" {
+		if n, err := strconv.Atoi(s); err == nil {
+			val = n
+		}
+	}
+	if val < min {
+		val = min
+	}
+	if val > max {
+		val = max
+	}
+	return val
+}
+
 // SetupRoutes sets up all API routes
 func SetupRoutes(s *Server) *mux.Router {
 	r := mux.NewRouter()
+
+	// Health probes (outside /api prefix so load-balancers and k8s can reach them cheaply)
+	r.HandleFunc("/healthz", s.HandleHealthz).Methods("GET")
+	r.HandleFunc("/readyz", s.HandleReadyz).Methods("GET")
 
 	// API routes
 	api := r.PathPrefix("/api").Subrouter()

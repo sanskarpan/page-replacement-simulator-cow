@@ -21,7 +21,10 @@ type Process struct {
 	ID          string
 	Name        string
 	Priority    int32
-	State       atomic.Int32
+	// json:"-" on atomic fields prevents the encoder from emitting raw
+	// atomic struct internals; use marshalProcess (in pkg/api) or Load()
+	// accessors when serializing.
+	State       atomic.Int32 `json:"-"`
 
 	// Virtual memory
 	VirtualPages   uint64 // Number of virtual pages
@@ -29,14 +32,14 @@ type Process struct {
 	WorkingSetSize int32  // Current working set size
 
 	// Statistics
-	PageFaults     atomic.Int64
-	PageHits       atomic.Int64
-	MemoryAccesses atomic.Int64
-	CoWCopies      atomic.Int64 // Number of CoW copies made
+	PageFaults     atomic.Int64 `json:"-"`
+	PageHits       atomic.Int64 `json:"-"`
+	MemoryAccesses atomic.Int64 `json:"-"`
+	CoWCopies      atomic.Int64 `json:"-"` // Number of CoW copies made
 
 	// Timing
 	CreatedAt time.Time
-	CPUTime   atomic.Int64 // Nanoseconds
+	CPUTime   atomic.Int64 `json:"-"` // Nanoseconds
 
 	// Parent process (for fork/CoW)
 	ParentID string
@@ -121,6 +124,18 @@ func (p *Process) AddChild(childID string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.Children = append(p.Children, childID)
+}
+
+// RemoveChild removes a child process ID (for fork rollback)
+func (p *Process) RemoveChild(childID string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for i, id := range p.Children {
+		if id == childID {
+			p.Children = append(p.Children[:i], p.Children[i+1:]...)
+			return
+		}
+	}
 }
 
 // GetChildren returns all child process IDs

@@ -21,22 +21,24 @@ type Page struct {
 	ID          uint64    // Virtual page number
 	ProcessID   string    // Owner process
 	FrameNumber int32     // Physical frame number (-1 if not in memory)
-	State       atomic.Int32
+	// json:"-" on all atomic fields prevents the encoder from emitting raw
+	// atomic struct internals; use accessor methods or a DTO for serialization.
+	State       atomic.Int32 `json:"-"`
 
 	// Access tracking
-	LastAccessed atomic.Int64 // Unix nano timestamp
-	AccessCount  atomic.Int64 // For LFU
-	ReferenceBit atomic.Int32 // For CLOCK (0 or 1)
+	LastAccessed atomic.Int64 `json:"-"` // Unix nano timestamp
+	AccessCount  atomic.Int64 `json:"-"` // For LFU
+	ReferenceBit atomic.Int32 `json:"-"` // For CLOCK (0 or 1)
 
 	// Copy-on-Write
-	Shared       atomic.Bool
-	RefCount     atomic.Int32 // Reference count for CoW
-	OriginalPage uint64       // Original page ID if this is a CoW copy
+	Shared       atomic.Bool  `json:"-"`
+	RefCount     atomic.Int32 `json:"-"` // Reference count for CoW
+	OriginalPage uint64                   // Original page ID if this is a CoW copy
 
 	// Metadata
-	Dirty     atomic.Bool
-	Present   atomic.Bool // In physical memory
-	ReadOnly  atomic.Bool // For CoW shared pages
+	Dirty     atomic.Bool `json:"-"`
+	Present   atomic.Bool `json:"-"` // In physical memory
+	ReadOnly  atomic.Bool `json:"-"` // For CoW shared pages
 	CreatedAt time.Time
 
 	mu sync.RWMutex
@@ -70,8 +72,10 @@ func (p *Page) Access(write bool) {
 
 	if write {
 		p.Dirty.Store(true)
-		// Update state to dirty
-		p.State.CompareAndSwap(int32(PageValid), int32(PageDirty))
+		// Attempt transition from Valid first, then Shared.
+		if !p.State.CompareAndSwap(int32(PageValid), int32(PageDirty)) {
+			p.State.CompareAndSwap(int32(PageShared), int32(PageDirty))
+		}
 	}
 }
 
@@ -121,10 +125,14 @@ func (p *Page) IsShared() bool {
 	return p.Shared.Load()
 }
 
-// MakeShared marks page as shared for CoW
+// MakeShared marks page as shared for CoW.
+// Both flags are set under mu so a concurrent Access() call can never observe
+// Shared=true with ReadOnly=false.
 func (p *Page) MakeShared() {
+	p.mu.Lock()
 	p.Shared.Store(true)
 	p.ReadOnly.Store(true)
+	p.mu.Unlock()
 }
 
 // ClearReferenceBit clears the reference bit and returns old value
@@ -142,9 +150,17 @@ func (p *Page) IncrementRefCount() int32 {
 	return p.RefCount.Add(1)
 }
 
-// DecrementRefCount decrements reference count
+// DecrementRefCount decrements reference count, clamping at zero to prevent underflow.
 func (p *Page) DecrementRefCount() int32 {
-	return p.RefCount.Add(-1)
+	for {
+		cur := p.RefCount.Load()
+		if cur <= 0 {
+			return 0
+		}
+		if p.RefCount.CompareAndSwap(cur, cur-1) {
+			return cur - 1
+		}
+	}
 }
 
 // GetRefCount returns current reference count
@@ -177,6 +193,12 @@ func (p *Page) Clone(newID uint64) *Page {
 
 	return newPage
 }
+
+// LockShared acquires the page's read lock for a multi-field atomic snapshot.
+func (p *Page) LockShared()   { p.mu.RLock() }
+
+// UnlockShared releases the page's read lock.
+func (p *Page) UnlockShared() { p.mu.RUnlock() }
 
 // GetStateString returns a string representation of the page state
 func (p *Page) GetStateString() string {

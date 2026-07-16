@@ -1,3 +1,6 @@
+// Package simulator drives pre-defined workload scenarios against the memory
+// subsystem, collects results, and exposes comparison helpers for benchmarking
+// algorithms and frame-count sweeps.
 package simulator
 
 import (
@@ -34,7 +37,7 @@ func (t *Trace) Save(path string) error {
 	if err != nil {
 		return fmt.Errorf("marshal trace: %w", err)
 	}
-	return os.WriteFile(path, data, 0644)
+	return os.WriteFile(path, data, 0600)
 }
 
 // LoadTrace reads and unmarshals a trace from path.
@@ -119,12 +122,14 @@ func (s *Simulator) StopRecording() *Trace {
 // ReplayTrace replays a previously recorded trace on the current process manager.
 // Processes referenced by the trace must already exist.
 func (s *Simulator) ReplayTrace(t *Trace) error {
+	if t == nil {
+		return fmt.Errorf("trace is nil")
+	}
 	for _, e := range t.Entries {
 		if err := s.processManager.AccessMemory(e.ProcessID, e.VirtualPage, e.Write); err != nil {
 			return fmt.Errorf("replay failed at page %d (pid=%s write=%v): %w",
 				e.VirtualPage, e.ProcessID, e.Write, err)
 		}
-		s.sleep()
 	}
 	return nil
 }
@@ -333,6 +338,9 @@ func (s *Simulator) SimulateLocalityAccess(pid string, workingSetSize uint64, nu
 }
 
 func (s *Simulator) SimulateLoopingAccess(pid string, loopSize uint64, numIterations int, writeRatio float64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	for iter := 0; iter < numIterations; iter++ {
 		for i := uint64(0); i < loopSize; i++ {
 			write := s.rng.Float64() < writeRatio
@@ -366,7 +374,8 @@ func (s *Simulator) RunScenario(scenario string) (*ScenarioResult, error) {
 	}
 
 	mm := s.processManager.GetMemoryManager()
-	if mm.GetAlgorithm().GetName() == "Optimal" {
+	algName := mm.GetAlgorithm().GetName()
+	if algName == "Optimal" || algName == "OPT+" {
 		if err := s.precomputeAndSetOptimal(scenario, mm); err != nil {
 			result.Error = err.Error()
 			return result, err

@@ -104,7 +104,7 @@ func (p *PFF) adjustResidentSize(currentResident int32) {
 	}
 
 	if currentResident > p.targetResident+1 {
-		p.targetResident = currentResident - 1
+		p.targetResident = min(currentResident-1, p.maxResident)
 	}
 }
 

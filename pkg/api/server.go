@@ -1,13 +1,29 @@
+// Package api implements the HTTP/WebSocket server for the Page Replacement
+// Simulator. It exposes a REST API at /api/... for process management, memory
+// access simulation, algorithm control, and statistics; a WebSocket endpoint
+// at /api/ws for real-time metric streaming; and liveness/readiness probes at
+// /healthz and /readyz.
 package api
 
 import (
+	"strings"
 	"sync"
+	"time"
 
 	"github.com/page-replacement-cow/internal/algorithms"
 	"github.com/page-replacement-cow/internal/memory"
 	"github.com/page-replacement-cow/internal/monitor"
 	"github.com/page-replacement-cow/internal/process"
 	"github.com/page-replacement-cow/internal/simulator"
+)
+
+const (
+	// MaxRequestBodyBytes caps all JSON request bodies to prevent OOM from crafted payloads.
+	// Exported so the main package middleware can reference it without duplication.
+	MaxRequestBodyBytes = 1 << 20 // 1 MB
+
+	// maxHistoryItems caps query-param values for history/events pagination.
+	maxHistoryItems = 1000
 )
 
 // Server is the API server
@@ -22,10 +38,20 @@ type Server struct {
 	clientsMu sync.RWMutex
 
 	// Broadcast channel
-	broadcast chan interface{}
+	broadcast       chan interface{}
+	broadcastClosed bool
+	broadcastMu     sync.RWMutex
 
 	// Monitor stop channel
 	monitorStop chan struct{}
+
+	// allowedOrigins is the set of hostnames permitted for CORS and WebSocket origin checks.
+	// A nil map with allowAllOrigins=true accepts every origin.
+	allowedOrigins  map[string]bool
+	allowAllOrigins bool
+
+	// simulationMu guards against concurrent simulation runs which would race on shared state.
+	simulationMu sync.Mutex
 }
 
 // NewServer creates a new API server
@@ -47,8 +73,8 @@ func NewServer(numFrames int32, tlbSize int, algType algorithms.AlgorithmType) *
 	// Start broadcast handler
 	go server.handleBroadcast()
 
-	// Start periodic monitoring
-	server.monitorStop = mon.StartPeriodicCapture(1000 * 1000 * 1000) // 1 second
+	// Start periodic monitoring (1-second interval)
+	server.monitorStop = mon.StartPeriodicCapture(time.Second)
 
 	return server
 }
@@ -56,7 +82,10 @@ func NewServer(numFrames int32, tlbSize int, algType algorithms.AlgorithmType) *
 // Shutdown cleanly shuts down the server
 func (s *Server) Shutdown() {
 	close(s.monitorStop)
+	s.broadcastMu.Lock()
+	s.broadcastClosed = true
 	close(s.broadcast)
+	s.broadcastMu.Unlock()
 	s.memoryManager.Close()
 }
 
@@ -110,6 +139,12 @@ func (s *Server) UnregisterClient(client *Client) {
 
 // Broadcast broadcasts a message to all clients
 func (s *Server) Broadcast(message interface{}) {
+	s.broadcastMu.RLock()
+	closed := s.broadcastClosed
+	s.broadcastMu.RUnlock()
+	if closed {
+		return
+	}
 	select {
 	case s.broadcast <- message:
 	default:
@@ -135,4 +170,18 @@ func (s *Server) GetMonitor() *monitor.Monitor {
 // GetSimulator returns the simulator
 func (s *Server) GetSimulator() *simulator.Simulator {
 	return s.simulator
+}
+
+// SetAllowedOrigins configures which Origin hostnames may open WebSocket connections.
+// Replaces the package-level upgrader.CheckOrigin that previously allowed all origins.
+func (s *Server) SetAllowedOrigins(domains []string) {
+	s.allowedOrigins = make(map[string]bool)
+	for _, d := range domains {
+		d = strings.TrimSpace(d)
+		if d == "*" {
+			s.allowAllOrigins = true
+			return
+		}
+		s.allowedOrigins[d] = true
+	}
 }

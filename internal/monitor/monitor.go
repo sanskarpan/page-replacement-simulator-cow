@@ -1,7 +1,11 @@
+// Package monitor periodically snapshots system state and exposes it as
+// structured data for the REST API and WebSocket clients.  It tracks per-process
+// statistics, frame occupancy, event history, and thrashing detection.
 package monitor
 
 import (
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/page-replacement-cow/internal/memory"
@@ -13,6 +17,9 @@ import (
 type Monitor struct {
 	processManager *process.ProcessManager
 	memoryManager  *memory.MemoryManager
+
+	// Goroutine lifecycle guard — prevents duplicate background goroutines.
+	started atomic.Bool
 
 	// Historical data
 	history      []HistoricalSnapshot
@@ -50,6 +57,10 @@ type Event struct {
 
 // NewMonitor creates a new monitor
 func NewMonitor(pm *process.ProcessManager, mm *memory.MemoryManager) *Monitor {
+	thrashWindow := 5
+	if thrashWindow <= 0 {
+		thrashWindow = 1
+	}
 	mon := &Monitor{
 		processManager:  pm,
 		memoryManager:   mm,
@@ -60,7 +71,7 @@ func NewMonitor(pm *process.ProcessManager, mm *memory.MemoryManager) *Monitor {
 		eventSubs:       make(map[int]chan Event),
 		nextSubID:       1,
 		thrashThreshold: 0.8,
-		thrashWindow:    5,
+		thrashWindow:    thrashWindow,
 	}
 
 	// Set up event callback
@@ -81,20 +92,28 @@ func (mon *Monitor) handleEvent(eventType string, data map[string]interface{}) {
 	mon.eventsMu.Lock()
 	mon.events = append(mon.events, event)
 	if len(mon.events) > mon.maxEvents {
+		mon.events[0].Data = nil // release backing map before reslicing to prevent memory leak
 		mon.events = mon.events[1:]
 	}
 	mon.eventsMu.Unlock()
 
-	// Broadcast to subscribers
+	// Broadcast to subscribers.
+	// Copy channel refs under the lock, then send outside the lock so that a
+	// full subscriber buffer never stalls other lock acquisitions.
 	mon.eventSubsMu.Lock()
+	chs := make([]chan Event, 0, len(mon.eventSubs))
 	for _, ch := range mon.eventSubs {
+		chs = append(chs, ch)
+	}
+	mon.eventSubsMu.Unlock()
+
+	for _, ch := range chs {
 		select {
 		case ch <- event:
 		default:
 			// Channel full, skip
 		}
 	}
-	mon.eventSubsMu.Unlock()
 }
 
 // CaptureSnapshot captures a snapshot of current metrics
@@ -107,6 +126,7 @@ func (mon *Monitor) CaptureSnapshot() {
 	mon.historyMu.Lock()
 	mon.history = append(mon.history, snapshot)
 	if len(mon.history) > mon.maxHistory {
+		mon.history[0].Metrics = nil // release *MetricsSnapshot pointer before reslicing
 		mon.history = mon.history[1:]
 	}
 	mon.historyMu.Unlock()
@@ -117,6 +137,9 @@ func (mon *Monitor) CaptureSnapshot() {
 // detectThrashing computes the incremental fault rate over the last thrashWindow
 // snapshots and fires a "thrashing_detected" event on the rising edge.
 func (mon *Monitor) detectThrashing() {
+	if mon.thrashWindow <= 0 {
+		return
+	}
 	mon.historyMu.RLock()
 	n := len(mon.history)
 	if n < 2 {
@@ -134,7 +157,7 @@ func (mon *Monitor) detectThrashing() {
 	mon.historyMu.RUnlock()
 
 	deltaAccesses := newAccesses - oldAccesses
-	if deltaAccesses == 0 {
+	if deltaAccesses <= 0 {
 		return
 	}
 	windowFaultRate := float64(newFaults-oldFaults) / float64(deltaAccesses)
@@ -173,6 +196,10 @@ type ThrashingInfo struct {
 
 // GetThrashingInfo returns current thrashing detector state.
 func (mon *Monitor) GetThrashingInfo() ThrashingInfo {
+	if mon.thrashWindow <= 0 {
+		return ThrashingInfo{}
+	}
+
 	mon.thrashMu.RLock()
 	thrashing := mon.isThrashing
 	detectedAt := mon.thrashedAt
@@ -249,8 +276,13 @@ func (mon *Monitor) GetEvents(last int) []Event {
 	return events
 }
 
-// SubscribeEvents subscribes to event stream
+// SubscribeEvents subscribes to the event stream.
+// bufferSize is clamped to a minimum of 16 so a zero or negative value does not
+// create an unbuffered channel that immediately drops every event.
 func (mon *Monitor) SubscribeEvents(bufferSize int) (int, <-chan Event) {
+	if bufferSize < 16 {
+		bufferSize = 16
+	}
 	mon.eventSubsMu.Lock()
 	defer mon.eventSubsMu.Unlock()
 
@@ -263,15 +295,14 @@ func (mon *Monitor) SubscribeEvents(bufferSize int) (int, <-chan Event) {
 	return subID, ch
 }
 
-// UnsubscribeEvents unsubscribes from event stream
+// UnsubscribeEvents unsubscribes from the event stream.
+// The channel is removed from the fan-out map; it is NOT closed here because
+// handleEvent may be mid-send to it outside the lock (close + concurrent send = panic).
+// The channel is GC'd once all readers and the map entry are gone.
 func (mon *Monitor) UnsubscribeEvents(subID int) {
 	mon.eventSubsMu.Lock()
-	defer mon.eventSubsMu.Unlock()
-
-	if ch, exists := mon.eventSubs[subID]; exists {
-		close(ch)
-		delete(mon.eventSubs, subID)
-	}
+	delete(mon.eventSubs, subID)
+	mon.eventSubsMu.Unlock()
 }
 
 // GetSystemStatus returns current system status
@@ -348,47 +379,56 @@ func (mon *Monitor) GetFrameDetails() []FrameDetail {
 
 // SystemStatus contains system status information
 type SystemStatus struct {
-	Timestamp     time.Time
-	Metrics       *models.MetricsSnapshot
-	ProcessCount  int
-	AlgorithmName string
-	Uptime        time.Duration
+	Timestamp     time.Time               `json:"timestamp"`
+	Metrics       *models.MetricsSnapshot `json:"metrics"`
+	ProcessCount  int                     `json:"process_count"`
+	AlgorithmName string                  `json:"algorithm_name"`
+	Uptime        time.Duration           `json:"uptime_ns"`
 }
 
 // ProcessDetail contains detailed process information
 type ProcessDetail struct {
-	ID             string
-	Name           string
-	State          string
-	Priority       int32
-	PageFaults     int64
-	PageHits       int64
-	MemoryAccesses int64
-	CoWCopies      int64
-	PageFaultRate  float64
-	PageHitRate    float64
-	TotalPages     int
-	PresentPages   int
-	SharedPages    int
-	DirtyPages     int
+	ID             string  `json:"id"`
+	Name           string  `json:"name"`
+	State          string  `json:"state"`
+	Priority       int32   `json:"priority"`
+	PageFaults     int64   `json:"page_faults"`
+	PageHits       int64   `json:"page_hits"`
+	MemoryAccesses int64   `json:"memory_accesses"`
+	CoWCopies      int64   `json:"cow_copies"`
+	PageFaultRate  float64 `json:"page_fault_rate"`
+	PageHitRate    float64 `json:"page_hit_rate"`
+	TotalPages     int     `json:"total_pages"`
+	PresentPages   int     `json:"present_pages"`
+	SharedPages    int     `json:"shared_pages"`
+	DirtyPages     int     `json:"dirty_pages"`
 }
 
 // FrameDetail contains detailed frame information
 type FrameDetail struct {
-	ID          int32
-	Free        bool
-	Pinned      bool
-	Modified    bool
-	PageID      uint64
-	ProcessID   string
-	LoadedAt    time.Time
-	LastAccess  time.Time
-	AccessCount int64
-	Age         int64
+	ID          int32     `json:"id"`
+	Free        bool      `json:"free"`
+	Pinned      bool      `json:"pinned"`
+	Modified    bool      `json:"modified"`
+	PageID      uint64    `json:"page_id"`
+	ProcessID   string    `json:"process_id"`
+	LoadedAt    time.Time `json:"loaded_at"`
+	LastAccess  time.Time `json:"last_access"`
+	AccessCount int64     `json:"access_count"`
+	Age         int64     `json:"age_ns"`
 }
 
-// StartPeriodicCapture starts periodic snapshot capture
+// StartPeriodicCapture starts periodic snapshot capture.
+// Subsequent calls while a capture goroutine is already running are no-ops:
+// a closed channel is returned so callers that select on it don't block.
 func (mon *Monitor) StartPeriodicCapture(interval time.Duration) chan struct{} {
+	if !mon.started.CompareAndSwap(false, true) {
+		// Already running — return a no-op stop channel.
+		ch := make(chan struct{})
+		close(ch)
+		return ch
+	}
+
 	stopCh := make(chan struct{})
 
 	go func() {
@@ -417,4 +457,10 @@ func (mon *Monitor) ClearHistory() {
 	mon.eventsMu.Lock()
 	mon.events = make([]Event, 0)
 	mon.eventsMu.Unlock()
+
+	// Reset thrash state so stale isThrashing=true doesn't persist after a reset.
+	mon.thrashMu.Lock()
+	mon.isThrashing = false
+	mon.thrashedAt = time.Time{}
+	mon.thrashMu.Unlock()
 }

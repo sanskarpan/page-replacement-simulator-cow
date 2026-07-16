@@ -18,12 +18,12 @@ func TestClearClustersOnlyAffectsTargetProcess(t *testing.T) {
 	pcm.ClearClusters("procA")
 
 	// procA's cluster should be gone.
-	if pages := pcm.GetPrefetchPages(10); len(pages) > 0 {
+	if pages := pcm.GetPrefetchPages("procA", 10); len(pages) > 0 {
 		t.Errorf("expected procA cluster to be cleared, still got %d prefetch pages", len(pages))
 	}
 
 	// procB's cluster must survive.
-	if pages := pcm.GetPrefetchPages(20); len(pages) == 0 {
+	if pages := pcm.GetPrefetchPages("procB", 20); len(pages) == 0 {
 		t.Error("procB cluster was wrongly cleared when procA was removed")
 	}
 }
@@ -35,10 +35,10 @@ func TestClearClustersEmptyStringClearsAll(t *testing.T) {
 
 	pcm.ClearClusters("") // global reset
 
-	if pages := pcm.GetPrefetchPages(1); len(pages) > 0 {
+	if pages := pcm.GetPrefetchPages("pA", 1); len(pages) > 0 {
 		t.Error("expected all clusters cleared on empty processID")
 	}
-	if pages := pcm.GetPrefetchPages(5); len(pages) > 0 {
+	if pages := pcm.GetPrefetchPages("pB", 5); len(pages) > 0 {
 		t.Error("expected all clusters cleared on empty processID")
 	}
 }
