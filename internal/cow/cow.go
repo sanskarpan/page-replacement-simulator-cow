@@ -1,3 +1,6 @@
+// Package cow implements Copy-on-Write semantics for forked processes.
+// On fork, pages are marked Shared+ReadOnly; the first write triggers a
+// physical copy so parent and child diverge cleanly.
 package cow
 
 import (

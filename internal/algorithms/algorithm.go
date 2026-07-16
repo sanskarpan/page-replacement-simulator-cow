@@ -1,3 +1,7 @@
+// Package algorithms implements 12 page-replacement algorithms: LRU, CLOCK,
+// LFU, FIFO, Optimal, Random, ARC, CAR, WSClock, PFF, OPT+, and NRU.
+// All implementations satisfy the Algorithm interface so the MemoryManager
+// can swap them at runtime.
 package algorithms
 
 import (

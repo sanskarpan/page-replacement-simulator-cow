@@ -9,11 +9,11 @@ import (
 
 // TLBEntry represents a single TLB entry
 type TLBEntry struct {
-	VirtualPage uint64
-	FrameNumber int32
-	ProcessID   string
-	Valid       bool
-	LastAccess  time.Time
+	VirtualPage  uint64
+	FrameNumber  int32
+	ProcessID    string
+	Valid        bool
+	lastAccessNs int64 // UnixNano; updated atomically to avoid write-lock on every read
 }
 
 // TLB (Translation Lookaside Buffer) is a cache for page table translations
@@ -41,18 +41,26 @@ func (t *TLB) makeKey(processID string, virtualPage uint64) string {
 	return processID + ":" + strconv.FormatUint(virtualPage, 10)
 }
 
-// Lookup looks up a virtual page in the TLB
+// Lookup looks up a virtual page in the TLB.
+// Uses RLock for the common hit path; upgrades to Lock only on eviction.
+// LastAccess is updated under the read lock using a separate atomic to avoid
+// taking a write lock on every read.
 func (t *TLB) Lookup(processID string, virtualPage uint64) (int32, bool) {
-	t.mu.Lock()
 	key := t.makeKey(processID, virtualPage)
+
+	t.mu.RLock()
 	entry, exists := t.entries[key]
 	if exists && entry.Valid {
-		entry.LastAccess = time.Now()
-		t.mu.Unlock()
+		frameNum := entry.FrameNumber
+		t.mu.RUnlock()
+		// Update last-access time without a write lock: overwrite the int64
+		// under-the-hood value atomically.  A torn read is harmless here
+		// because the value is only used for LRU ordering, not correctness.
+		atomic.StoreInt64(&entry.lastAccessNs, time.Now().UnixNano())
 		t.hits.Add(1)
-		return entry.FrameNumber, true
+		return frameNum, true
 	}
-	t.mu.Unlock()
+	t.mu.RUnlock()
 
 	t.misses.Add(1)
 	return -1, false
@@ -71,24 +79,25 @@ func (t *TLB) Insert(processID string, virtualPage uint64, frameNumber int32) {
 	}
 
 	t.entries[key] = &TLBEntry{
-		VirtualPage: virtualPage,
-		FrameNumber: frameNumber,
-		ProcessID:   processID,
-		Valid:       true,
-		LastAccess:  time.Now(),
+		VirtualPage:  virtualPage,
+		FrameNumber:  frameNumber,
+		ProcessID:    processID,
+		Valid:         true,
+		lastAccessNs: time.Now().UnixNano(),
 	}
 }
 
-// evictLRU evicts the least recently used entry
+// evictLRU evicts the least recently used entry. Must be called with mu.Lock held.
 func (t *TLB) evictLRU() {
 	var oldestKey string
-	var oldestTime time.Time
+	var oldestNs int64
 	first := true
 
 	for key, entry := range t.entries {
-		if first || entry.LastAccess.Before(oldestTime) {
+		ns := atomic.LoadInt64(&entry.lastAccessNs)
+		if first || ns < oldestNs {
 			oldestKey = key
-			oldestTime = entry.LastAccess
+			oldestNs = ns
 			first = false
 		}
 	}
@@ -158,9 +167,9 @@ func (t *TLB) GetStats() TLBStats {
 
 // TLBStats contains TLB statistics
 type TLBStats struct {
-	Capacity int
-	Size     int
-	Hits     int64
-	Misses   int64
-	HitRate  float64
+	Capacity int     `json:"capacity"`
+	Size     int     `json:"size"`
+	Hits     int64   `json:"hits"`
+	Misses   int64   `json:"misses"`
+	HitRate  float64 `json:"hit_rate"`
 }

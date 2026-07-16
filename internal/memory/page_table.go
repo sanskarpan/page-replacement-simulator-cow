@@ -203,10 +203,19 @@ func (pt *PageTable) GetStats() PageTableStats {
 	return stats
 }
 
+// ReplaceEntry atomically replaces an existing page-table entry.
+// Used during CoW to substitute a new private page for a shared one
+// while holding the page-table's own mutex rather than bypassing it.
+func (pt *PageTable) ReplaceEntry(virtualPage uint64, page *models.Page) {
+	pt.mu.Lock()
+	defer pt.mu.Unlock()
+	pt.Entries[virtualPage] = page
+}
+
 // PageTableStats contains statistics about a page table
 type PageTableStats struct {
-	TotalPages   int
-	PresentPages int
-	SharedPages  int
-	DirtyPages   int
+	TotalPages   int `json:"total_pages"`
+	PresentPages int `json:"present_pages"`
+	SharedPages  int `json:"shared_pages"`
+	DirtyPages   int `json:"dirty_pages"`
 }

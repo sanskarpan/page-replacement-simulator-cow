@@ -2,12 +2,15 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime/debug"
 	"strings"
 	"syscall"
 	"time"
@@ -18,12 +21,23 @@ import (
 )
 
 func main() {
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{
+		Level: slog.LevelInfo,
+	})))
+
 	port := flag.Int("port", 8080, "Server port")
 	numFrames := flag.Int("frames", 128, "Number of physical memory frames")
 	tlbSize := flag.Int("tlb", 16, "TLB size")
-	algo := flag.String("algorithm", "LRU", "Page replacement algorithm (LRU, CLOCK, LFU, FIFO, Optimal, Random, ARC, CAR, WSClock, PFF, OPT+)")
+	algo := flag.String("algorithm", "LRU", "Page replacement algorithm (LRU, CLOCK, LFU, FIFO, Optimal, Random, ARC, CAR, WSClock, PFF, OPT+, NRU)")
 	corsDomains := flag.String("cors", "localhost", "Allowed CORS domains (comma-separated, use * for all)")
 	flag.Parse()
+
+	if *numFrames < 4 || *numFrames > 1<<20 {
+		log.Fatalf("--frames must be between 4 and 1048576, got %d", *numFrames)
+	}
+	if *tlbSize < 1 || *tlbSize > 65536 {
+		log.Fatalf("--tlb must be between 1 and 65536, got %d", *tlbSize)
+	}
 
 	var algType algorithms.AlgorithmType
 	switch *algo {
@@ -52,10 +66,13 @@ func main() {
 	case "NRU":
 		algType = algorithms.AlgorithmNRU
 	default:
-		log.Fatalf("Invalid algorithm: %s", *algo)
+		log.Fatalf("Invalid algorithm: %s. Valid values: LRU, CLOCK, LFU, FIFO, Optimal, Random, ARC, CAR, WSClock, PFF, OPT+, NRU", *algo)
 	}
 
+	allowedDomains := strings.Split(*corsDomains, ",")
 	server := api.NewServer(int32(*numFrames), *tlbSize, algType)
+	server.SetAllowedOrigins(allowedDomains)
+
 	router := api.SetupRoutes(server)
 
 	staticHandler, err := web.FileServer()
@@ -64,11 +81,19 @@ func main() {
 	}
 	router.PathPrefix("/").Handler(staticHandler)
 
-	corsMiddleware := buildCORSMiddleware(strings.Split(*corsDomains, ","))
+	chain := panicRecoveryMiddleware(
+		buildCORSMiddleware(allowedDomains)(
+			requestBodyLimitMiddleware(router),
+		),
+	)
 
 	httpServer := &http.Server{
-		Addr:    fmt.Sprintf(":%d", *port),
-		Handler: corsMiddleware(router),
+		Addr:              fmt.Sprintf(":%d", *port),
+		Handler:           chain,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      60 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 
 	go func() {
@@ -76,27 +101,57 @@ func main() {
 		signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 		<-sigChan
 
-		log.Println("\nShutting down server...")
+		slog.Info("shutting down server")
 		server.Shutdown()
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 		if err := httpServer.Shutdown(ctx); err != nil {
-			log.Printf("Server shutdown error: %v", err)
+			slog.Error("server shutdown", "error", err)
 		}
 	}()
 
-	log.Printf("Starting Page Replacement Simulator + CoW Server")
-	log.Printf("  Port: %d", *port)
-	log.Printf("  Frames: %d", *numFrames)
-	log.Printf("  TLB Size: %d", *tlbSize)
-	log.Printf("  Algorithm: %s", *algo)
-	log.Printf("  CORS domains: %s", *corsDomains)
-	log.Printf("\nServer running at http://localhost:%d", *port)
-	log.Printf("Open http://localhost:%d in your browser to access the UI\n", *port)
+	slog.Info("page replacement simulator started",
+		"port", *port,
+		"frames", *numFrames,
+		"tlb", *tlbSize,
+		"algorithm", *algo,
+		"cors", *corsDomains,
+	)
 
 	if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("Server failed: %v", err)
 	}
+}
+
+// panicRecoveryMiddleware catches any panic in a handler, logs the stack trace,
+// and returns a 500 to the client without crashing the process.
+func panicRecoveryMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			if rec := recover(); rec != nil {
+				slog.Error("panic recovered",
+					"method", r.Method,
+					"path", r.URL.Path,
+					"recovery", fmt.Sprintf("%v", rec),
+					"stack", string(debug.Stack()),
+				)
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusInternalServerError)
+				json.NewEncoder(w).Encode(map[string]string{"error": "internal server error"})
+			}
+		}()
+		next.ServeHTTP(w, r)
+	})
+}
+
+// requestBodyLimitMiddleware caps incoming request bodies to prevent OOM from crafted payloads.
+func requestBodyLimitMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Body != nil {
+			r.Body = http.MaxBytesReader(w, r.Body, api.MaxRequestBodyBytes)
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func buildCORSMiddleware(allowedDomains []string) func(http.Handler) http.Handler {
@@ -131,7 +186,7 @@ func buildCORSMiddleware(allowedDomains []string) func(http.Handler) http.Handle
 
 			if r.Method != "GET" && r.Method != "HEAD" && r.Method != "OPTIONS" {
 				if origin != "" && !allowAll && !allowedSet[extractHost(origin)] {
-					writeError(w, http.StatusForbidden, "cross-origin request denied")
+					writeJSONError(w, http.StatusForbidden, "cross-origin request denied")
 					return
 				}
 			}
@@ -150,8 +205,8 @@ func extractHost(origin string) string {
 	return origin
 }
 
-func writeError(w http.ResponseWriter, status int, message string) {
+func writeJSONError(w http.ResponseWriter, status int, message string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	fmt.Fprintf(w, `{"error":"%s"}`, message)
+	json.NewEncoder(w).Encode(map[string]string{"error": message})
 }

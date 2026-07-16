@@ -1,3 +1,6 @@
+// Package simulator drives pre-defined workload scenarios against the memory
+// subsystem, collects results, and exposes comparison helpers for benchmarking
+// algorithms and frame-count sweeps.
 package simulator
 
 import (

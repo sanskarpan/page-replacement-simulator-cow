@@ -1,3 +1,6 @@
+// Package monitor periodically snapshots system state and exposes it as
+// structured data for the REST API and WebSocket clients.  It tracks per-process
+// statistics, frame occupancy, event history, and thrashing detection.
 package monitor
 
 import (
@@ -348,43 +351,43 @@ func (mon *Monitor) GetFrameDetails() []FrameDetail {
 
 // SystemStatus contains system status information
 type SystemStatus struct {
-	Timestamp     time.Time
-	Metrics       *models.MetricsSnapshot
-	ProcessCount  int
-	AlgorithmName string
-	Uptime        time.Duration
+	Timestamp     time.Time               `json:"timestamp"`
+	Metrics       *models.MetricsSnapshot `json:"metrics"`
+	ProcessCount  int                     `json:"process_count"`
+	AlgorithmName string                  `json:"algorithm_name"`
+	Uptime        time.Duration           `json:"uptime_ns"`
 }
 
 // ProcessDetail contains detailed process information
 type ProcessDetail struct {
-	ID             string
-	Name           string
-	State          string
-	Priority       int32
-	PageFaults     int64
-	PageHits       int64
-	MemoryAccesses int64
-	CoWCopies      int64
-	PageFaultRate  float64
-	PageHitRate    float64
-	TotalPages     int
-	PresentPages   int
-	SharedPages    int
-	DirtyPages     int
+	ID             string  `json:"id"`
+	Name           string  `json:"name"`
+	State          string  `json:"state"`
+	Priority       int32   `json:"priority"`
+	PageFaults     int64   `json:"page_faults"`
+	PageHits       int64   `json:"page_hits"`
+	MemoryAccesses int64   `json:"memory_accesses"`
+	CoWCopies      int64   `json:"cow_copies"`
+	PageFaultRate  float64 `json:"page_fault_rate"`
+	PageHitRate    float64 `json:"page_hit_rate"`
+	TotalPages     int     `json:"total_pages"`
+	PresentPages   int     `json:"present_pages"`
+	SharedPages    int     `json:"shared_pages"`
+	DirtyPages     int     `json:"dirty_pages"`
 }
 
 // FrameDetail contains detailed frame information
 type FrameDetail struct {
-	ID          int32
-	Free        bool
-	Pinned      bool
-	Modified    bool
-	PageID      uint64
-	ProcessID   string
-	LoadedAt    time.Time
-	LastAccess  time.Time
-	AccessCount int64
-	Age         int64
+	ID          int32     `json:"id"`
+	Free        bool      `json:"free"`
+	Pinned      bool      `json:"pinned"`
+	Modified    bool      `json:"modified"`
+	PageID      uint64    `json:"page_id"`
+	ProcessID   string    `json:"process_id"`
+	LoadedAt    time.Time `json:"loaded_at"`
+	LastAccess  time.Time `json:"last_access"`
+	AccessCount int64     `json:"access_count"`
+	Age         int64     `json:"age_ns"`
 }
 
 // StartPeriodicCapture starts periodic snapshot capture

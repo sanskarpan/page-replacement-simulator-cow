@@ -1,3 +1,6 @@
+// Package process manages the lifecycle of simulated OS processes: creation,
+// termination, forking (with Copy-on-Write semantics), and memory-access
+// dispatch to the MemoryManager.
 package process
 
 import (

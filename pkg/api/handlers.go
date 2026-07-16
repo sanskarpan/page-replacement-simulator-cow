@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"strconv"
 
@@ -166,30 +167,14 @@ func (s *Server) HandleGetPageTable(w http.ResponseWriter, r *http.Request) {
 
 // HandleGetHistory returns historical metrics
 func (s *Server) HandleGetHistory(w http.ResponseWriter, r *http.Request) {
-	lastStr := r.URL.Query().Get("last")
-	last := 100
-
-	if lastStr != "" {
-		if val, err := strconv.Atoi(lastStr); err == nil {
-			last = val
-		}
-	}
-
+	last := clampedQueryInt(r, "last", 100, 1, maxHistoryItems)
 	history := s.monitor.GetHistory(last)
 	writeJSON(w, http.StatusOK, history)
 }
 
 // HandleGetEvents returns recent events
 func (s *Server) HandleGetEvents(w http.ResponseWriter, r *http.Request) {
-	lastStr := r.URL.Query().Get("last")
-	last := 50
-
-	if lastStr != "" {
-		if val, err := strconv.Atoi(lastStr); err == nil {
-			last = val
-		}
-	}
-
+	last := clampedQueryInt(r, "last", 50, 1, maxHistoryItems)
 	events := s.monitor.GetEvents(last)
 	writeJSON(w, http.StatusOK, events)
 }
@@ -248,7 +233,8 @@ func (s *Server) HandleSetAlgorithm(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"algorithm": req.Algorithm})
 }
 
-// HandleRunSimulation runs a simulation scenario
+// HandleRunSimulation runs a simulation scenario.
+// At most one simulation may run at a time; concurrent requests get 409.
 func (s *Server) HandleRunSimulation(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Scenario string `json:"scenario"`
@@ -258,14 +244,25 @@ func (s *Server) HandleRunSimulation(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
+	if req.Scenario == "" {
+		writeError(w, http.StatusBadRequest, "scenario is required")
+		return
+	}
 
-	// Run simulation in background
+	if !s.simulationMu.TryLock() {
+		writeError(w, http.StatusConflict, "a simulation is already running")
+		return
+	}
+
 	go func() {
+		defer s.simulationMu.Unlock()
+
 		result, err := s.simulator.RunScenario(req.Scenario)
 		if err != nil {
+			// Do not leak internal error details over the wire.
+			slog.Error("simulation failed", "scenario", req.Scenario, "error", err)
 			s.Broadcast(map[string]interface{}{
-				"type":    "simulation_error",
-				"error":   err.Error(),
+				"type":     "simulation_error",
 				"scenario": req.Scenario,
 			})
 			return
@@ -355,7 +352,8 @@ func (s *Server) HandleEnableFeature(w http.ResponseWriter, r *http.Request) {
 	case "clustering":
 		s.memoryManager.EnableClustering(req.Enabled)
 	default:
-		writeError(w, http.StatusBadRequest, "unknown feature: "+req.Feature)
+		// Do not echo back req.Feature; it is untrusted user input.
+		writeError(w, http.StatusBadRequest, "unknown feature; valid values: numa, compression, clustering")
 		return
 	}
 
@@ -380,7 +378,8 @@ func (s *Server) HandleMapHugePage(w http.ResponseWriter, r *http.Request) {
 
 	frameID, err := s.memoryManager.MapHugePage(pid, req.HugePage)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		slog.Error("MapHugePage failed", "pid", pid, "hugepage_idx", req.HugePage, "error", err)
+		writeError(w, http.StatusInternalServerError, "failed to map huge page")
 		return
 	}
 
@@ -539,21 +538,60 @@ func geometricFrameRange(min, max int32, maxPoints int) []int32 {
 	return result
 }
 
+// HandleHealthz is a liveness probe — returns 200 when the process is alive.
+func (s *Server) HandleHealthz(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// HandleReadyz is a readiness probe — returns 200 once the simulation engine
+// is fully initialized and able to serve traffic.
+func (s *Server) HandleReadyz(w http.ResponseWriter, r *http.Request) {
+	if s.memoryManager == nil || s.processManager == nil {
+		writeError(w, http.StatusServiceUnavailable, "not ready")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
+}
+
 // Helper functions
 
 func writeJSON(w http.ResponseWriter, status int, data interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(data)
+	if err := json.NewEncoder(w).Encode(data); err != nil {
+		slog.Error("writeJSON encode", "error", err)
+	}
 }
 
 func writeError(w http.ResponseWriter, status int, message string) {
 	writeJSON(w, status, map[string]string{"error": message})
 }
 
+// clampedQueryInt reads a URL query parameter as an integer, returning
+// defaultVal if absent or unparseable, and clamping to [min, max].
+func clampedQueryInt(r *http.Request, param string, defaultVal, min, max int) int {
+	val := defaultVal
+	if s := r.URL.Query().Get(param); s != "" {
+		if n, err := strconv.Atoi(s); err == nil {
+			val = n
+		}
+	}
+	if val < min {
+		val = min
+	}
+	if val > max {
+		val = max
+	}
+	return val
+}
+
 // SetupRoutes sets up all API routes
 func SetupRoutes(s *Server) *mux.Router {
 	r := mux.NewRouter()
+
+	// Health probes (outside /api prefix so load-balancers and k8s can reach them cheaply)
+	r.HandleFunc("/healthz", s.HandleHealthz).Methods("GET")
+	r.HandleFunc("/readyz", s.HandleReadyz).Methods("GET")
 
 	// API routes
 	api := r.PathPrefix("/api").Subrouter()

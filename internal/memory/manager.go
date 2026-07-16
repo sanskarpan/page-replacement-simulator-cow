@@ -1,3 +1,6 @@
+// Package memory implements the virtual-memory subsystem: frame allocation,
+// page-table management, TLB, Copy-on-Write, huge pages, NUMA placement,
+// memory compression, and page-clustering.  The central type is MemoryManager.
 package memory
 
 import (
@@ -486,7 +489,7 @@ func (mm *MemoryManager) handleCoW(processID string, page *models.Page, frame *m
 	newPage.SetFrame(newFrame.ID)
 
 	pageTable := mm.pageTables[processID]
-	pageTable.Entries[page.ID] = newPage
+	pageTable.ReplaceEntry(page.ID, newPage)
 
 	mm.tlb.Invalidate(processID, page.ID)
 	// Use the original virtual page ID so post-CoW accesses hit the TLB
