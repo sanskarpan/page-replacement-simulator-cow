@@ -1,8 +1,10 @@
 package simulator
 
 import (
+	"encoding/json"
 	"fmt"
 	"math/rand"
+	"os"
 	"sort"
 	"sync"
 	"time"
@@ -15,15 +17,37 @@ import (
 
 // TraceEntry captures a single memory access for deterministic replay.
 type TraceEntry struct {
-	ProcessID   string
-	VirtualPage uint64
-	Write       bool
+	ProcessID   string `json:"process_id"`
+	VirtualPage uint64 `json:"virtual_page"`
+	Write       bool   `json:"write"`
 }
 
 // Trace is a recorded sequence of memory accesses.
 type Trace struct {
-	Entries []TraceEntry
-	Seed    int64
+	Entries []TraceEntry `json:"entries"`
+	Seed    int64        `json:"seed"`
+}
+
+// Save marshals the trace to JSON and writes it to path.
+func (t *Trace) Save(path string) error {
+	data, err := json.Marshal(t)
+	if err != nil {
+		return fmt.Errorf("marshal trace: %w", err)
+	}
+	return os.WriteFile(path, data, 0644)
+}
+
+// LoadTrace reads and unmarshals a trace from path.
+func LoadTrace(path string) (*Trace, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read trace: %w", err)
+	}
+	var t Trace
+	if err := json.Unmarshal(data, &t); err != nil {
+		return nil, fmt.Errorf("unmarshal trace: %w", err)
+	}
+	return &t, nil
 }
 
 // AlgorithmResult holds per-algorithm metrics from a comparison run.
@@ -118,6 +142,7 @@ func (s *Simulator) CompareAlgorithms(scenario string, numFrames int32, tlbSize 
 		algorithms.AlgorithmCLOCK,
 		algorithms.AlgorithmWSClock,
 		algorithms.AlgorithmLFU,
+		algorithms.AlgorithmNRU,
 		algorithms.AlgorithmPFF,
 		algorithms.AlgorithmFIFO,
 		algorithms.AlgorithmRandom,
@@ -166,6 +191,89 @@ func (s *Simulator) CompareAlgorithms(scenario string, numFrames int32, tlbSize 
 		results[i].Rank = i + 1
 	}
 	return results, nil
+}
+
+// FrameCountResult holds per-frame-count fault metrics from a sweep run.
+type FrameCountResult struct {
+	NumFrames  int32   `json:"num_frames"`
+	Algorithm  string  `json:"algorithm"`
+	FaultRate  float64 `json:"fault_rate"`
+	HitRate    float64 `json:"hit_rate"`
+	PageFaults int64   `json:"page_faults"`
+	PageHits   int64   `json:"page_hits"`
+	Evictions  int64   `json:"evictions"`
+}
+
+// CompareFrameCounts sweeps across the given frame counts for a single algorithm,
+// returning how the fault rate changes with available memory (the Belady curve).
+// All runs use the same RNG seed as the parent simulator for fair comparison.
+func (s *Simulator) CompareFrameCounts(scenario, algName string, frameCounts []int32, tlbSize int) ([]FrameCountResult, error) {
+	algType, err := parseAlgorithmName(algName)
+	if err != nil {
+		return nil, err
+	}
+
+	results := make([]FrameCountResult, 0, len(frameCounts))
+	for _, fc := range frameCounts {
+		mm := memory.NewMemoryManager(fc, tlbSize, algType)
+		pm := process.NewProcessManager(mm)
+		sim := &Simulator{
+			processManager: pm,
+			seed:           s.seed,
+			rng:            rand.New(rand.NewSource(s.seed)),
+			fastMode:       true,
+		}
+
+		_, runErr := sim.RunScenario(scenario)
+		mm.Close()
+		if runErr != nil {
+			continue
+		}
+
+		m := mm.GetMetrics()
+		results = append(results, FrameCountResult{
+			NumFrames:  fc,
+			Algorithm:  algName,
+			FaultRate:  m.PageFaultRate,
+			HitRate:    m.PageHitRate,
+			PageFaults: m.PageFaults,
+			PageHits:   m.PageHits,
+			Evictions:  m.Evictions,
+		})
+	}
+	return results, nil
+}
+
+// parseAlgorithmName maps a human-readable algorithm name to its AlgorithmType.
+func parseAlgorithmName(name string) (algorithms.AlgorithmType, error) {
+	switch name {
+	case "LRU":
+		return algorithms.AlgorithmLRU, nil
+	case "CLOCK":
+		return algorithms.AlgorithmCLOCK, nil
+	case "LFU":
+		return algorithms.AlgorithmLFU, nil
+	case "FIFO":
+		return algorithms.AlgorithmFIFO, nil
+	case "Optimal":
+		return algorithms.AlgorithmOptimal, nil
+	case "Random":
+		return algorithms.AlgorithmRandom, nil
+	case "ARC":
+		return algorithms.AlgorithmARC, nil
+	case "CAR":
+		return algorithms.AlgorithmCAR, nil
+	case "WSClock":
+		return algorithms.AlgorithmWSClock, nil
+	case "PFF":
+		return algorithms.AlgorithmPFF, nil
+	case "OPT+":
+		return algorithms.AlgorithmOPTPlus, nil
+	case "NRU":
+		return algorithms.AlgorithmNRU, nil
+	default:
+		return algorithms.AlgorithmLRU, fmt.Errorf("unknown algorithm: %s", name)
+	}
 }
 
 func (s *Simulator) SimulateSequentialAccess(pid string, startPage, numPages uint64, write bool) error {
