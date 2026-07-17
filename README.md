@@ -1,15 +1,30 @@
 # Page Replacement Simulator + Copy-on-Write
 
-A production-grade virtual memory simulator implementing 12 page replacement algorithms and Copy-on-Write (CoW) semantics. Includes a real-time web UI, REST API, WebSocket streaming, CLI, and a comprehensive test suite with race-detector coverage.
+[![CI](https://github.com/sanskarpan/page-replacement-simulator-cow/actions/workflows/ci.yml/badge.svg)](https://github.com/sanskarpan/page-replacement-simulator-cow/actions/workflows/ci.yml)
+[![Go 1.25](https://img.shields.io/badge/Go-1.25-00ADD8?logo=go)](https://go.dev/dl/)
+
+A virtual memory simulator implementing 12 page replacement algorithms and Copy-on-Write (CoW) semantics. Includes a real-time web UI, REST API, WebSocket streaming, CLI, and a comprehensive test suite with race-detector coverage.
+
+## Table of contents
+
+- [Algorithms](#algorithms)
+- [Features](#features)
+- [Architecture](#architecture)
+- [Installation](#installation)
+- [Usage](#usage)
+- [API Reference](#api-reference)
+- [Testing](#testing)
+- [Performance](#performance)
+- [Contributing](#contributing)
 
 ## Algorithms
 
-| Algorithm | Description |
-|-----------|-------------|
-| **LRU** | Least Recently Used — evicts the page unused longest |
+| Algorithm | Strategy |
+|-----------|----------|
+| **LRU** | Evicts the page unused longest |
 | **CLOCK** | Second-chance circular buffer with reference bits |
-| **LFU** | Least Frequently Used — evicts the least-accessed page |
-| **FIFO** | First-In First-Out — evicts the oldest resident page |
+| **LFU** | Evicts the least-accessed page |
+| **FIFO** | Evicts the oldest resident page |
 | **Optimal** | Bélády's theoretically optimal offline algorithm |
 | **OPT+** | Lookahead-enhanced optimal with future-access hints |
 | **ARC** | Adaptive Replacement Cache — self-tuning recency/frequency balance |
@@ -21,7 +36,7 @@ A production-grade virtual memory simulator implementing 12 page replacement alg
 
 ## Features
 
-### Memory Subsystem
+### Memory subsystem
 - **Virtual memory** — per-process page tables with Present, Dirty, and Reference bits
 - **Physical frames** — configurable pool with LRU TLB for fast address translation
 - **4-level page table** — x86-64 style multi-level PT with huge-page (2 MB) support
@@ -33,67 +48,55 @@ A production-grade virtual memory simulator implementing 12 page replacement alg
 
 ### Copy-on-Write
 - Fork-based CoW: child shares parent pages marked read-only
-- Write triggers physical copy; reference counting ensures last writer takes ownership without copying
-- Cross-process race safety: `HandleWrite` guards against spurious copies for unregistered processes
+- Write triggers a physical copy; reference counting lets the last writer take ownership without copying
+- `HandleWrite` guards against spurious copies for processes not registered as page sharers
 
 ### Observability
 - Structured JSON logging via `log/slog`
-- `GET /api/metrics` — live counters including `dropped_events` (events lost due to channel backpressure)
+- `GET /api/metrics` — live counters including `dropped_events` (events lost to channel backpressure)
 - `GET /api/history` — rolling metric snapshots
-- `WS /api/ws` — real-time WebSocket event stream (process lifecycle, page faults, CoW copies, evictions)
+- `WS /api/ws` — real-time WebSocket event stream (page faults, CoW copies, evictions, process lifecycle)
 
 ### CLI
 - Single-scenario run, 12-algorithm head-to-head comparison, and Bélády-curve frame-count sweep
-- `--output text|json|csv` for CI-friendly output
-
-## Security & Reliability
-
-This codebase has been hardened through a 70-point audit. Key fixes include:
-
-- All data races and TOCTOU bugs eliminated (verified with `go test -race`)
-- Atomic fields carry `json:"-"` tags; process/frame state is serialized through DTOs, not raw structs
-- Compressed-page data preserved on OOM fault-in failure (`RestoreCompressed`)
-- `CoW.HandleWrite` and `PageTable.Clone` are atomic under their respective mutexes
-- Lock order enforced throughout (`pm.mu → parent.mu`, never reversed)
-- Trace files written with `0600` permissions
-- Event channel backpressure counted in metrics, never blocks callers
+- `--output text|json|csv` for pipeline-friendly output
 
 ## Architecture
 
 ```
-Page-Replacement-Simulator-CoW/
+page-replacement-simulator-cow/
 ├── cmd/
-│   ├── server/          # HTTP server + web UI
-│   └── cli/             # Command-line interface
+│   ├── server/          # HTTP server + web UI entry point
+│   └── cli/             # Command-line interface entry point
 ├── internal/
-│   ├── memory/          # MemoryManager, FrameTable, TLB, PageTable, advanced features
+│   ├── memory/          # MemoryManager, FrameTable, TLB, PageTable, compression, clustering
 │   ├── algorithms/      # 12 page replacement algorithm implementations
 │   ├── cow/             # Copy-on-Write manager and reference counter
 │   ├── process/         # ProcessManager: lifecycle, fork, memory dispatch
 │   ├── simulator/       # Scenario runner, trace save/replay, comparison engine
 │   └── monitor/         # System status aggregation
 ├── pkg/
-│   ├── models/          # Core value types (Page, Frame, Process, Metrics, …)
+│   ├── models/          # Core types (Page, Frame, Process, Metrics, …)
 │   └── api/             # HTTP handlers, WebSocket hub, routing
 ├── web/static/          # Vanilla JS + D3.js frontend
 └── tests/
     ├── unit/            # ~25 focused unit test files
-    ├── integration/     # 20 end-to-end tests with defer mm.Close()
-    └── benchmark/       # 7 benchmarks, all race-detector clean
+    ├── integration/     # 20 end-to-end tests
+    └── benchmark/       # 7 benchmarks
 ```
 
 ## Installation
 
+Requires **Go 1.25+**.
+
 ```bash
-git clone https://github.com/sanskarpan/page-replacement-cow.git
-cd page-replacement-cow
+git clone https://github.com/sanskarpan/page-replacement-simulator-cow.git
+cd page-replacement-simulator-cow
 go mod download
 
 go build -o bin/server ./cmd/server
 go build -o bin/cli    ./cmd/cli
 ```
-
-Requires **Go 1.22+**.
 
 ## Usage
 
@@ -125,9 +128,7 @@ Requires **Go 1.22+**.
           -frame-min 8 -frame-max 256 -output json
 ```
 
-### Available scenarios
-
-`sequential` · `random` · `locality` · `looping` · `mixed` · `fork_cow` · `thrashing`
+**Available scenarios:** `sequential` · `random` · `locality` · `looping` · `mixed` · `fork_cow` · `thrashing`
 
 ## API Reference
 
@@ -144,8 +145,8 @@ Requires **Go 1.22+**.
 | Method | Path | Description |
 |--------|------|-------------|
 | `GET` | `/api/processes` | List all processes |
-| `POST` | `/api/processes` | Create process `{name, priority, virtual_pages}` |
-| `GET` | `/api/processes/{id}` | Process detail (DTO — atomic fields as numbers) |
+| `POST` | `/api/processes` | Create process — `{name, priority, virtual_pages}` |
+| `GET` | `/api/processes/{id}` | Process detail (atomic fields serialized as numbers) |
 | `DELETE` | `/api/processes/{id}` | Terminate process |
 | `POST` | `/api/processes/{id}/fork` | Fork process (CoW) |
 | `GET` | `/api/processes/{id}/pages` | Page table entries |
@@ -157,9 +158,9 @@ Requires **Go 1.22+**.
 ### Memory
 | Method | Path | Description |
 |--------|------|-------------|
-| `POST` | `/api/memory/access` | `{process_id, virtual_page, write}` |
-| `GET` | `/api/memory/frames` | Frame details |
-| `POST` | `/api/memory/algorithm` | Switch algorithm live |
+| `POST` | `/api/memory/access` | Access a page — `{process_id, virtual_page, write}` |
+| `GET` | `/api/memory/frames` | Frame table details |
+| `POST` | `/api/memory/algorithm` | Switch replacement algorithm live |
 
 ### Stats
 | Method | Path | Description |
@@ -178,18 +179,20 @@ Requires **Go 1.22+**.
 | `POST` | `/api/simulation/sweep` | Bélády curve across frame counts |
 | `GET` | `/api/simulation/thrashing` | Live thrashing status |
 
-### Features
+### Feature toggles
 | Method | Path | Description |
 |--------|------|-------------|
-| `POST` | `/api/feature/toggle` | Enable/disable NUMA, compression, clustering |
+| `POST` | `/api/feature/toggle` | Enable/disable NUMA, compression, clustering — `{feature, enabled}` |
 
 ### WebSocket
+
 ```
 WS /api/ws
 ```
+
 Events: `initial_state`, `memory_access`, `page_fault`, `page_eviction`, `cow_copy`, `process_created`, `process_forked`, `process_removed`, `system_reset`, `huge_page_mapped`.
 
-### Quick curl examples
+### Quick examples
 
 ```bash
 BASE=http://localhost:8080/api
@@ -228,19 +231,15 @@ go test -race ./...
 go test -race ./tests/unit/...
 go test -race ./tests/integration/...
 
-# Benchmarks (includes CoW, TLB, and all algorithm benchmarks)
-go test -bench=. -race ./tests/benchmark/
+# Benchmarks
+go test -bench=. -benchmem ./tests/benchmark/
 ```
 
-### Test structure
-
-| Suite | Files | Focus |
-|-------|-------|-------|
-| `tests/unit/` | ~25 files | Algorithm correctness, race conditions, compression, CoW, prefetch, clustering |
-| `tests/integration/` | 1 file, 20 tests | End-to-end: memory access, page replacement, CoW chains, TLB, all algorithms |
-| `tests/benchmark/` | 1 file, 7 benchmarks | Memory access, LRU/CLOCK/LFU/FIFO throughput, TLB lookup, CoW fork |
-
-All integration tests use `defer mm.Close()` to prevent goroutine leaks. All benchmarks carry error checks on `ForkProcess`.
+| Suite | Coverage |
+|-------|----------|
+| `tests/unit/` | ~25 files — algorithm correctness, compression, CoW, prefetch, clustering |
+| `tests/integration/` | 20 end-to-end tests — memory access, page replacement, CoW chains, TLB, all algorithms |
+| `tests/benchmark/` | 7 benchmarks — LRU/CLOCK/LFU/FIFO throughput, TLB lookup, CoW fork |
 
 ## Performance
 
@@ -255,7 +254,6 @@ Measured on Apple M3 Pro with race detector enabled:
 
 ## Contributing
 
-1. Fork the repository and create a feature branch
-2. Add tests — unit tests for new logic, integration tests for new end-to-end paths
-3. Run `go test -race ./...` and confirm clean
-4. Submit a pull request with a clear description of what changed and why
+See [CONTRIBUTING.md](CONTRIBUTING.md) for setup instructions, coding guidelines, and the PR process.
+
+To report a security vulnerability, see [SECURITY.md](SECURITY.md).
